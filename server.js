@@ -39,7 +39,6 @@ CREATE TABLE IF NOT EXISTS leads (
 `);
 // TEMP: Serve UI directly from server
 app.get("/", (req, res) => {
-  res.setHeader("Content-Type", "text/html");
   res.send(`
 <!DOCTYPE html>
 <html>
@@ -49,11 +48,14 @@ app.get("/", (req, res) => {
   <style>
     body { font-family: Arial; padding: 30px; }
     input, button { padding: 10px; margin: 6px 0; display: block; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    th { background: #f2f2f2; }
   </style>
 </head>
 <body>
 
-<h1>AltoCRM – Server UI</h1>
+<h1>AltoCRM</h1>
 
 <form id="leadForm">
   <input id="full_name" placeholder="Full Name" />
@@ -62,21 +64,36 @@ app.get("/", (req, res) => {
   <button type="submit">Add Lead</button>
 </form>
 
-<ul id="list"></ul>
+<table>
+  <thead>
+    <tr>
+      <th>Full Name</th>
+      <th>Email</th>
+      <th>Company</th>
+    </tr>
+  </thead>
+  <tbody id="tableBody"></tbody>
+</table>
 
 <script>
 async function load() {
   const r = await fetch('/api/leads');
   const d = await r.json();
-  document.getElementById('list').innerHTML =
-    d.map(x => '<li>' + x.full_name + ' – ' + x.email + '</li>').join('');
+  document.getElementById('tableBody').innerHTML =
+    d.map(l => \`
+      <tr>
+        <td>\${l.full_name || ''}</td>
+        <td>\${l.email || ''}</td>
+        <td>\${l.company || ''}</td>
+      </tr>
+    \`).join('');
 }
 
 document.getElementById('leadForm').onsubmit = async e => {
   e.preventDefault();
   await fetch('/api/leads', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
       full_name: full_name.value,
       email: email.value,
@@ -85,6 +102,15 @@ document.getElementById('leadForm').onsubmit = async e => {
   });
   load();
 };
+
+load();
+</script>
+
+</body>
+</html>
+  `);
+});
+
 
 load();
 </script>
