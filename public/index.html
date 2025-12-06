@@ -3,139 +3,150 @@
 <head>
   <title>AltoCRM</title>
   <style>
-    body { font-family: Arial, sans-serif; padding: 20px; }
     table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ccc; padding: 6px; font-size: 13px; }
-    th { background: #f4f4f4; position: sticky; top: 0; z-index: 2; }
-    tr.filter-row th { background: #fff; top: 28px; z-index: 1; }
-    input, select { width: 95%; font-size: 12px; }
-    td:hover { background: #fafafa; cursor: pointer; }
+    th, td { border: 1px solid #ccc; padding: 6px; }
+    th { background: #f0f0f0; }
+    button { margin: 3px; }
   </style>
 </head>
 <body>
 
-<h2>AltoCRM – Filterable CRM Grid</h2>
+<h2>AltoCRM</h2>
 
-<button onclick="addLead()">➕ Add Lead</button>
-<br><br>
+<form id="leadForm">
+  <input id="full_name" placeholder="Full Name">
+  <input id="email" placeholder="Email">
+  <input id="company" placeholder="Company">
+  <button>Add</button>
+</form>
 
-<table id="grid"></table>
+<hr>
+
+<label>Company Filter:</label>
+<select id="companyFilter">
+  <option value="">All</option>
+  <option value="__BLANK__">(Blank)</option>
+</select>
+
+<button id="bulkDelete">Delete Selected</button>
+<button id="undoBtn" style="display:none;">Undo Delete</button>
+
+<table>
+  <thead>
+    <tr>
+      <th><input type="checkbox" id="selectAll"></th>
+      <th>Name</th><th>Email</th><th>Company</th><th>Action</th>
+    </tr>
+  </thead>
+  <tbody id="tbody"></tbody>
+</table>
 
 <script>
-let fields = [];
-let leads = [];
-let filters = {};
+let allLeads = [];
+let deletedIds = [];
+let undoTimer = null;
 
+/* ---------- LOAD ---------- */
 async function load() {
-  fields = await fetch("/api/fields").then(r => r.json());
-  leads = await fetch("/api/leads").then(r => r.json());
-  render();
+  const res = await fetch("/api/leads");
+  allLeads = await res.json();
+  populateFilter();
+  render(allLeads);
 }
 
-async function addLead() {
-  await fetch("/api/leads", { method: "POST" });
-  load();
+function populateFilter() {
+  const sel = document.getElementById("companyFilter");
+  const values = [...new Set(allLeads.map(l => l.company).filter(v => v))];
+  sel.innerHTML = `<option value="">All</option><option value="__BLANK__">(Blank)</option>`;
+  values.forEach(v => sel.innerHTML += `<option>${v}</option>`);
 }
 
-function render() {
-  let filtered = leads.filter(l =>
-    Object.keys(filters).every(key => {
-      if (!filters[key]) return true;
-      const value = (l[key] || "").toLowerCase();
-      return value.includes(filters[key].toLowerCase());
-    })
-  );
-
-  let html = "<tr>" +
-    fields.map(f => `<th>${f.label}</th>`).join("") +
-    "</tr>";
-
-  html += "<tr class='filter-row'>" +
-    fields.map(f => `<th>${filterControl(f)}</th>`).join("") +
-    "</tr>";
-
-  filtered.forEach(l => {
-    html += `<tr data-id="${l.id}">`;
-    fields.forEach(f => {
-      html += `
-        <td data-field="${f.key}" ondblclick="editCell(this)">
-          ${l[f.key] || ""}
-        </td>`;
-    });
-    html += "</tr>";
+/* ---------- RENDER ---------- */
+function render(data) {
+  const tbody = document.getElementById("tbody");
+  tbody.innerHTML = "";
+  data.forEach(l => {
+    tbody.innerHTML += `
+      <tr>
+        <td><input type="checkbox" class="rowCheck" value="${l.id}"></td>
+        <td>${l.full_name || ""}</td>
+        <td>${l.email || ""}</td>
+        <td>${l.company || ""}</td>
+        <td><button onclick="deleteRows([${l.id}])">Delete</button></td>
+      </tr>`;
   });
-
-  document.getElementById("grid").innerHTML = html;
 }
 
-function filterControl(field) {
-  if (field.type === "select" && field.options) {
-    const opts =
-      field.options.stages ||
-      field.options.sources ||
-      field.options.outcomes ||
-      [];
+/* ---------- FILTER ---------- */
+document.getElementById("companyFilter").onchange = e => {
+  const v = e.target.value;
+  let filtered = [...allLeads];
 
-    return `
-      <select onchange="setFilter('${field.key}', this.value)">
-        <option value="">All</option>
-        ${opts.map(o => `<option value="${o}">${o}</option>`).join("")}
-      </select>
-    `;
+  if (v === "__BLANK__") {
+    filtered = filtered.filter(l => !l.company || l.company.trim() === "");
+  } else if (v) {
+    filtered = filtered.filter(l => l.company === v);
   }
 
-  return `<input placeholder="Filter" oninput="setFilter('${field.key}', this.value)">`;
-}
+  render(filtered);
+};
 
-function setFilter(key, value) {
-  filters[key] = value;
-  render();
-}
-
-function editCell(td) {
-  const tr = td.parentElement;
-  const leadId = tr.dataset.id;
-  const fieldKey = td.dataset.field;
-  const field = fields.find(f => f.key === fieldKey);
-  const oldValue = td.innerText;
-
-  td.innerHTML = "";
-
-  if (field.type === "select" && field.options) {
-    const select = document.createElement("select");
-    const list =
-      field.options.stages ||
-      field.options.sources ||
-      field.options.outcomes ||
-      [];
-
-    select.innerHTML =
-      `<option value=""></option>` +
-      list.map(o => `<option ${o === oldValue ? "selected" : ""}>${o}</option>`).join("");
-
-    select.onchange = () => save(td, leadId, fieldKey, select.value);
-    select.onblur = () => save(td, leadId, fieldKey, select.value);
-    td.appendChild(select);
-    select.focus();
-    return;
-  }
-
-  const input = document.createElement("input");
-  input.value = oldValue;
-  input.onblur = () => save(td, leadId, fieldKey, input.value);
-  input.onkeydown = e => e.key === "Enter" && input.blur();
-  td.appendChild(input);
-  input.focus();
-}
-
-async function save(td, leadId, fieldKey, value) {
-  await fetch("/api/cell", {
-    method: "PUT",
+/* ---------- ADD ---------- */
+document.getElementById("leadForm").onsubmit = async e => {
+  e.preventDefault();
+  await fetch("/api/leads", {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ leadId, fieldKey, value })
+    body: JSON.stringify({
+      full_name: full_name.value,
+      email: email.value,
+      company: company.value
+    })
   });
-  td.innerText = value || "";
+  leadForm.reset();
+  load();
+};
+
+/* ---------- DELETE + UNDO ---------- */
+async function deleteRows(ids) {
+  deletedIds = ids;
+
+  await fetch("/api/leads/delete", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ ids })
+  });
+
+  document.getElementById("undoBtn").style.display = "inline";
+  clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => {
+    deletedIds = [];
+    document.getElementById("undoBtn").style.display = "none";
+    load();
+  }, 5000);
 }
+
+/* ---------- RESTORE ---------- */
+document.getElementById("undoBtn").onclick = async () => {
+  await fetch("/api/leads/restore", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ ids: deletedIds })
+  });
+  deletedIds = [];
+  document.getElementById("undoBtn").style.display = "none";
+  load();
+};
+
+/* ---------- BULK ---------- */
+document.getElementById("bulkDelete").onclick = () => {
+  const ids = [...document.querySelectorAll(".rowCheck:checked")].map(c => +c.value);
+  if (ids.length) deleteRows(ids);
+};
+
+document.getElementById("selectAll").onclick = e => {
+  document.querySelectorAll(".rowCheck").forEach(c => c.checked = e.target.checked);
+};
 
 load();
 </script>
