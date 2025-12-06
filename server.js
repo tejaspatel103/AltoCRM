@@ -39,50 +39,58 @@ CREATE TABLE IF NOT EXISTS leads (
 `);
 // TEMP: Serve UI directly from server
 app.get("/", (req, res) => {
+  res.setHeader("Content-Type", "text/html");
   res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>AltoCRM</title>
-      <style>
-        body { font-family: Arial; padding: 30px; }
-        input, button { padding: 10px; margin: 8px 0; display: block; }
-      </style>
-    </head>
-    <body>
-      <h1>AltoCRM – Server Rendered UI</h1>
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>AltoCRM</title>
+  <style>
+    body { font-family: Arial; padding: 30px; }
+    input, button { padding: 10px; margin: 6px 0; display: block; }
+  </style>
+</head>
+<body>
 
-      <form id="f">
-        <input id="name" placeholder="Full Name" />
-        <input id="email" placeholder="Email" />
-        <button>Add Lead</button>
-      </form>
+<h1>AltoCRM – Server UI</h1>
 
-      <ul id="list"></ul>
+<form id="leadForm">
+  <input id="full_name" placeholder="Full Name" />
+  <input id="email" placeholder="Email" />
+  <input id="company" placeholder="Company" />
+  <button type="submit">Add Lead</button>
+</form>
 
-      <script>
-        async function load() {
-          const r = await fetch('/api/leads');
-          const d = await r.json();
-          list.innerHTML = d.map(x => '<li>' + x.full_name + '</li>').join('');
-        }
-        f.onsubmit = async e => {
-          e.preventDefault();
-          await fetch('/api/leads', {
-            method: 'POST',
-            headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({
-              full_name: name.value,
-              email: email.value,
-              company: ''
-            })
-          });
-          load();
-        };
-        load();
-      </script>
-    </body>
-    </html>
+<ul id="list"></ul>
+
+<script>
+async function load() {
+  const r = await fetch('/api/leads');
+  const d = await r.json();
+  document.getElementById('list').innerHTML =
+    d.map(x => '<li>' + x.full_name + ' – ' + x.email + '</li>').join('');
+}
+
+document.getElementById('leadForm').onsubmit = async e => {
+  e.preventDefault();
+  await fetch('/api/leads', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      full_name: full_name.value,
+      email: email.value,
+      company: company.value
+    })
+  });
+  load();
+};
+
+load();
+</script>
+
+</body>
+</html>
   `);
 });
 
