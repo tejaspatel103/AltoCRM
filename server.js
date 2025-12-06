@@ -23,10 +23,26 @@ CREATE TABLE IF NOT EXISTS leads (
 
 // ---- APIs
 app.get("/api/leads", (req, res) => {
-  db.all("SELECT * FROM leads ORDER BY created_at DESC", (err, rows) => {
-    res.json(rows || []);
-  });
+  const q = req.query.q || "";
+  const sort = req.query.sort || "new";
+
+  let orderBy = "created_at DESC";
+  if (sort === "old") orderBy = "created_at ASC";
+  if (sort === "name") orderBy = "full_name ASC";
+
+  db.all(
+    `
+    SELECT * FROM leads
+    WHERE full_name LIKE ? OR email LIKE ? OR company LIKE ?
+    ORDER BY ${orderBy}
+    `,
+    [`%${q}%`, `%${q}%`, `%${q}%`],
+    (err, rows) => {
+      res.json(rows || []);
+    }
+  );
 });
+
 
 app.post("/api/leads", (req, res) => {
   const { full_name, email, company } = req.body;
