@@ -5,21 +5,20 @@ const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 app.use(express.json());
 
-// --------------------
-// Database
-// --------------------
+// ---------------- DB ----------------
 const db = new sqlite3.Database("./crm.db");
 
 db.run(`
 CREATE TABLE IF NOT EXISTS leads (
   id TEXT PRIMARY KEY,
   full_name TEXT,
-  first_name TEXT,
-  last_name TEXT,
   email TEXT,
   company TEXT,
+  first_name TEXT,
+  last_name TEXT,
   company_short TEXT,
   website TEXT,
   lead_score INTEGER,
@@ -28,37 +27,24 @@ CREATE TABLE IF NOT EXISTS leads (
 )
 `);
 
-// --------------------
-// API: Get leads (with search + sort)
-// --------------------
+// ---------------- API ----------------
 app.get("/api/leads", (req, res) => {
   const q = req.query.q || "";
   const sort = req.query.sort || "new";
 
-  let orderBy = "created_at DESC";
-  if (sort === "old") orderBy = "created_at ASC";
-  if (sort === "name") orderBy = "full_name ASC";
+  let order = "created_at DESC";
+  if (sort === "old") order = "created_at ASC";
+  if (sort === "name") order = "full_name ASC";
 
   db.all(
-    `
-    SELECT *
-    FROM leads
-    WHERE 
-      full_name LIKE ? OR
-      email LIKE ? OR
-      company LIKE ?
-    ORDER BY ${orderBy}
-    `,
+    `SELECT * FROM leads
+     WHERE full_name LIKE ? OR email LIKE ? OR company LIKE ?
+     ORDER BY ${order}`,
     [`%${q}%`, `%${q}%`, `%${q}%`],
-    (err, rows) => {
-      res.json(rows || []);
-    }
+    (err, rows) => res.json(rows || [])
   );
 });
 
-// --------------------
-// API: Create lead
-// --------------------
 app.post("/api/leads", (req, res) => {
   const { full_name, email, company } = req.body;
   db.run(
@@ -69,22 +55,18 @@ app.post("/api/leads", (req, res) => {
   );
 });
 
-// --------------------
-// API: AI Enrichment
-// --------------------
 app.post("/api/enrich/:id", async (req, res) => {
   const id = req.params.id;
   db.get("SELECT * FROM leads WHERE id = ?", [id], async (err, lead) => {
     if (!lead) return res.json({ error: "Not found" });
 
     const prompt = `
-You are enriching CRM data.
+Return JSON only.
 
 Full Name: ${lead.full_name}
 Email: ${lead.email}
 Company: ${lead.company}
 
-Return ONLY valid JSON:
 {
   "first_name":"",
   "last_name":"",
@@ -98,7 +80,7 @@ Return ONLY valid JSON:
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": "Bearer " + process.env.OPENAI_API_KEY,
+        Authorization: "Bearer " + process.env.OPENAI_API_KEY,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -112,12 +94,8 @@ Return ONLY valid JSON:
 
     db.run(
       `UPDATE leads SET
-        first_name=?,
-        last_name=?,
-        company_short=?,
-        website=?,
-        lead_score=?,
-        lead_reason=?
+        first_name=?, last_name=?, company_short=?, website=?,
+        lead_score=?, lead_reason=?
        WHERE id=?`,
       [
         ai.first_name,
@@ -133,56 +111,29 @@ Return ONLY valid JSON:
   });
 });
 
-// --------------------
-// UI
-// --------------------
+// ---------------- UI ----------------
 app.get("/", (req, res) => {
   res.send(`
 <!DOCTYPE html>
 <html>
-<head>
-  <title>AltoCRM</title>
-  <style>
-    body { font-family: Arial; padding: 30px; }
-    input, select, button { padding: 8px; margin: 4px; }
-    table { border-collapse: collapse; width: 100%; margin-top: 15px; }
-    th, td { border: 1px solid #ccc; padding: 8px; }
-    th { background: #f5f5f5; }
-  </style>
-</head>
-<body>
+<body style="font-family:Arial;padding:30px">
 
-<h1>AltoCRM</h1>
+<h2>AltoCRM</h2>
 
-<input id="search" placeholder="Search name, email, company">
-<select id="sort">
-  <option value="new">Newest First</option>
-  <option value="old">Oldest First</option>
+<input id="q" placeholder="Search">
+<select id="s">
+  <option value="new">Newest</option>
+  <option value="old">Oldest</option>
   <option value="name">Name A–Z</option>
 </select>
 
-<form id="leadForm">
-  <input id="full_name" placeholder="Full Name">
-  <input id="email" placeholder="Email">
-  <input id="company" placeholder="Company">
+<form id="f">
+  <input id="n" placeholder="Full Name">
+  <input id="e" placeholder="Email">
+  <input id="c" placeholder="Company">
   <button>Add Lead</button>
 </form>
 
-<table>
+<table border="1" cellpadding="6" style="margin-top:10px;width:100%">
 <thead>
-<tr>
-  <th>Name</th>
-  <th>Email</th>
-  <th>Company</th>
-  <th>AI Info</th>
-  <th>Action</th>
-</tr>
-</thead>
-<tbody id="rows"></tbody>
-</table>
-
-<script>
-async function load(){
-  const q = search.value;
-  const s = sort.value;
-  const r = await fetch('/
+<tr><th>Name</th><th>Email</th><th>Company</th><th>AI</th><t
