@@ -3,75 +3,36 @@
 <head>
   <title>AltoCRM</title>
   <style>
-    body { font-family: Arial; padding: 30px; }
-    input, select, button { padding: 8px; margin: 4px; }
-    table { border-collapse: collapse; margin-top: 12px; width: 100%; }
-    th, td { border: 1px solid #ccc; padding: 8px; }
-    th { background: #f4f4f4; }
+    body { font-family: Arial; padding:20px }
+    table { border-collapse: collapse; width:100%; }
+    th, td { border:1px solid #ccc; padding:6px; white-space:nowrap }
+    th { background:#f4f4f4; position:sticky; top:0 }
   </style>
 </head>
 <body>
 
-<h2>AltoCRM</h2>
+<h2>AltoCRM – Lead Grid (Read Only)</h2>
 
-<input id="search" placeholder="Search name, email, company">
-<select id="sort">
-  <option value="new">Newest First</option>
-  <option value="old">Oldest First</option>
-  <option value="name">Name A–Z</option>
-</select>
-
-<form id="f">
-  <input id="n" placeholder="Full Name">
-  <input id="e" placeholder="Email">
-  <input id="c" placeholder="Company">
-  <button>Add Lead</button>
-</form>
-
-<table>
-<thead>
-<tr>
-  <th>Name</th>
-  <th>Email</th>
-  <th>Company</th>
-</tr>
-</thead>
-<tbody id="t"></tbody>
-</table>
+<table id="grid"></table>
 
 <script>
-async function load(){
-  const q = search.value;
-  const s = sort.value;
-  const r = await fetch('/api/leads?q=' + encodeURIComponent(q) + '&sort=' + s);
-  const d = await r.json();
+async function load() {
+  const fields = await fetch("/api/fields").then(r=>r.json());
+  const leads = await fetch("/api/leads").then(r=>r.json());
 
-  t.innerHTML = d.map(x =>
-    `<tr>
-      <td>${x.full_name}</td>
-      <td>${x.email}</td>
-      <td>${x.company}</td>
-    </tr>`
-  ).join('');
+  let html = "<tr>" + fields.map(f=>`<th>${f.label}</th>`).join("") + "</tr>";
+
+  leads.forEach(l=>{
+    html += "<tr>";
+    fields.forEach(f=>{
+      html += `<td>${l[f.key] || ""}</td>`;
+    });
+    html += "</tr>";
+  });
+
+  document.getElementById("grid").innerHTML = html;
 }
 
-f.onsubmit = async e=>{
-  e.preventDefault();
-  await fetch('/api/leads',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      full_name:n.value,
-      email:e.value,
-      company:c.value
-    })
-  });
-  n.value=e.value=c.value='';
-  load();
-};
-
-search.oninput = load;
-sort.onchange = load;
 load();
 </script>
 
