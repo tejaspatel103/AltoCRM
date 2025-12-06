@@ -15,58 +15,30 @@ const pool = new Pool({
 });
 
 /* =======================
-   SAFE DB MIGRATION
+   SAFE BOOT (NO ASSUMPTIONS)
 ======================= */
-async function migrate() {
-  // Create table if missing
+async function boot() {
+  // Create minimal table ONLY if it does not exist
   await pool.query(`
     CREATE TABLE IF NOT EXISTS leads (
       id SERIAL PRIMARY KEY
     )
   `);
 
-  // Add missing columns safely
-  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS full_name TEXT`);
-  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS email TEXT`);
-  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS company TEXT`);
-  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS deleted BOOLEAN DEFAULT FALSE`);
-  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()`);
-
-  // Backward compatibility (older schema used "name")
-  await pool.query(`
-    UPDATE leads
-    SET full_name = name
-    WHERE full_name IS NULL
-    AND EXISTS (
-      SELECT 1
-      FROM information_schema.columns
-      WHERE table_name='leads' AND column_name='name'
-    )
-  `);
-
-  // Action log
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS action_log (
-      id SERIAL PRIMARY KEY,
-      lead_id INT,
-      action TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
-
-  console.log("✅ DB migrated safely");
+  console.log("✅ DB ready (no destructive migrations)");
 }
 
-migrate();
+boot();
 
 /* =======================
-   API
+   API (STABLE BASELINE)
 ======================= */
 
+// Get all leads (no deleted logic for now)
 app.get("/api/leads", async (_, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT * FROM leads WHERE deleted = false ORDER BY id DESC"
+      `SELECT * FROM leads ORDER BY id DESC`
     );
     res.json(rows);
   } catch (e) {
@@ -74,60 +46,26 @@ app.get("/api/leads", async (_, res) => {
   }
 });
 
+// Insert (works with dynamic columns)
 app.post("/api/leads", async (req, res) => {
-  const { full_name, email, company } = req.body;
+  try {
+    const keys = Object.keys(req.body);
+    const values = Object.values(req.body);
 
-  const { rows } = await pool.query(
-    `INSERT INTO leads (full_name, email, company)
-     VALUES ($1,$2,$3)
-     RETURNING *`,
-    [full_name, email, company]
-  );
+    const columns = keys.join(",");
+    const placeholders = keys.map((_, i) => `$${i + 1}`).join(",");
 
-  res.json(rows[0]);
-});
-
-/* ---- DELETE (SOFT) ---- */
-app.post("/api/leads/delete", async (req, res) => {
-  const { ids } = req.body;
-
-  await pool.query(
-    `UPDATE leads SET deleted = true WHERE id = ANY($1::int[])`,
-    [ids]
-  );
-
-  for (const id of ids) {
-    await pool.query(
-      `INSERT INTO action_log (lead_id, action) VALUES ($1,'DELETED')`,
-      [id]
+    const { rows } = await pool.query(
+      `INSERT INTO leads (${columns}) VALUES (${placeholders}) RETURNING *`,
+      values
     );
-  }
 
-  res.json({ success: true });
+    res.json(rows[0]);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-/* ---- RESTORE ---- */
-app.post("/api/leads/restore", async (req, res) => {
-  const { ids } = req.body;
-
-  await pool.query(
-    `UPDATE leads SET deleted = false WHERE id = ANY($1::int[])`,
-    [ids]
-  );
-
-  for (const id of ids) {
-    await pool.query(
-      `INSERT INTO action_log (lead_id, action) VALUES ($1,'RESTORED')`,
-      [id]
-    );
-  }
-
-  res.json({ success: true });
-});
-
-/* =======================
-   START
-======================= */
 app.listen(PORT, () => {
   console.log(`✅ AltoCRM running on port ${PORT}`);
 });
