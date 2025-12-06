@@ -3,34 +3,97 @@
 <head>
   <title>AltoCRM</title>
   <style>
-    body { font-family: Arial; padding:20px }
-    table { border-collapse: collapse; width:100%; }
-    th, td { border:1px solid #ccc; padding:6px; white-space:nowrap }
-    th { background:#f4f4f4; position:sticky; top:0 }
+    body { font-family: Arial; padding: 20px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 6px;
+      white-space: nowrap;
+    }
+    th {
+      background: #f4f4f4;
+      position: sticky;
+      top: 0;
+    }
+    td:hover { background: #fafafa; cursor: pointer; }
   </style>
 </head>
 <body>
 
-<h2>AltoCRM – Lead Grid (Read Only)</h2>
+<h2>AltoCRM – Inline Editable Grid</h2>
+
+<button onclick="addLead()">➕ Add Lead</button>
+<br><br>
 
 <table id="grid"></table>
 
 <script>
+let fields = [];
+let leads = [];
+
 async function load() {
-  const fields = await fetch("/api/fields").then(r=>r.json());
-  const leads = await fetch("/api/leads").then(r=>r.json());
+  fields = await fetch("/api/fields").then(r => r.json());
+  leads = await fetch("/api/leads").then(r => r.json());
+  render();
+}
 
-  let html = "<tr>" + fields.map(f=>`<th>${f.label}</th>`).join("") + "</tr>";
+async function addLead() {
+  await fetch("/api/leads", { method: "POST" });
+  load();
+}
 
-  leads.forEach(l=>{
-    html += "<tr>";
-    fields.forEach(f=>{
-      html += `<td>${l[f.key] || ""}</td>`;
+function render() {
+  let html = "<tr>" +
+    fields.map(f => `<th>${f.label}</th>`).join("") +
+    "</tr>";
+
+  leads.forEach(l => {
+    html += `<tr data-id="${l.id}">`;
+    fields.forEach(f => {
+      html += `
+        <td data-field="${f.key}" ondblclick="editCell(this)">
+          ${l[f.key] || ""}
+        </td>`;
     });
     html += "</tr>";
   });
 
   document.getElementById("grid").innerHTML = html;
+}
+
+function editCell(td) {
+  const tr = td.parentElement;
+  const leadId = tr.dataset.id;
+  const fieldKey = td.dataset.field;
+  const oldVal = td.innerText;
+
+  const input = document.createElement("input");
+  input.value = oldVal;
+  input.style.width = "95%";
+
+  input.onblur = async () => {
+    const newVal = input.value;
+    td.innerText = newVal;
+
+    await fetch("/api/cell", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        leadId,
+        fieldKey,
+        value: newVal
+      })
+    });
+  };
+
+  input.onkeydown = e => {
+    if (e.key === "Enter") input.blur();
+    if (e.key === "Escape") td.innerText = oldVal;
+  };
+
+  td.innerHTML = "";
+  td.appendChild(input);
+  input.focus();
 }
 
 load();
