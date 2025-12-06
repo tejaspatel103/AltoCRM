@@ -11,7 +11,10 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-/* ------------ DB INIT ------------ */
+/* =======================
+   DB INITIALIZATION
+======================= */
+
 async function init() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS fields (
@@ -22,18 +25,17 @@ async function init() {
       options JSONB,
       editable BOOLEAN,
       enrichable BOOLEAN,
-      integration_source TEXT,
       system_derived BOOLEAN,
       order_index INTEGER,
       hidden BOOLEAN DEFAULT FALSE
-    )
+    );
   `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS leads (
       id UUID PRIMARY KEY,
       created_at TIMESTAMP DEFAULT NOW()
-    )
+    );
   `);
 
   await pool.query(`
@@ -46,60 +48,187 @@ async function init() {
       updated_at TIMESTAMP DEFAULT NOW(),
       updated_by TEXT,
       PRIMARY KEY (lead_id, field_key)
-    )
+    );
   `);
 
   await seedFields();
 }
 
-/* ------------ SEED FIELDS ------------ */
+/* =======================
+   SAFE FIELD SEEDING
+======================= */
+
 async function seedFields() {
   const fields = [
-    ["Full Name","full_name","text",null,true,true,null,false,1],
-    ["First Name","first_name","text",null,true,true,null,false,2],
-    ["Last Name","last_name","text",null,true,true,null,false,3],
-    ["Company","company","text",null,true,true,null,false,4],
-    ["Company Short","company_short","text",null,true,true,null,false,5],
-    ["Title","title","text",null,true,true,null,false,6],
-    ["LinkedIn URL","linkedin_url","text",null,true,true,null,false,7],
-    ["Website","website","text",null,true,true,null,false,8],
-    ["City","city","text",null,true,true,null,false,9],
-    ["State","state","text",null,true,true,null,false,10],
-    ["Pipeline","pipeline","select",
-      ["New","Trying","Contacted","Follow-up","Meeting Booked","Re-meeting","Proposal","Won","Very Important","Lost","Not Interested","Tired of trying"],
-      true,false,null,false,11],
-    ["Lead Source","lead_source","select",
-      ["LI Search","Web Search","Local list","Job list","DM","Email","Call","Conference","Reference","1-o-1"],
-      true,false,null,false,12],
-    ["Call Outcome","call_outcome","select",
-      ["Interested","Meeting booked","Call back","Voicemail","Message to GK","Tired of calling","Req. correction","Not Interested","Wrong lead","Other"],
-      true,false,null,false,13],
-    ["Email 1","email_1","email",null,true,true,null,false,14],
-    ["Email 1 Status","email_1_status","select",
-      ["Unverified","Valid","Invalid","Abuse","Do not mail","Catch-all score"],
-      true,false,"zerobounce",false,15],
-    ["GK","gk","text",null,true,false,null,false,16],
-    ["Lead Score","lead_score","number",null,true,true,null,false,17],
-    ["Lead Score Reason","lead_score_reason","text",null,true,true,null,false,18],
-    ["Suggest Human","suggest_human","long_text",null,true,false,null,false,19],
-    ["Suggest AI","suggest_ai","long_text",null,false,true,null,false,20],
-    ["Manual Comment","manual_comment","long_text",null,true,false,null,false,21]
+    {
+      label: "Full Name",
+      key: "full_name",
+      type: "text",
+      options: null,
+      editable: true,
+      enrichable: true,
+      system: false,
+      order: 1
+    },
+    {
+      label: "Company",
+      key: "company",
+      type: "text",
+      options: null,
+      editable: true,
+      enrichable: true,
+      system: false,
+      order: 2
+    },
+    {
+      label: "Pipeline",
+      key: "pipeline",
+      type: "select",
+      options: {
+        stages: [
+          "New",
+          "Trying",
+          "Contacted",
+          "Follow-up",
+          "Meeting Booked",
+          "Re-meeting",
+          "Proposal",
+          "Won",
+          "Very Important",
+          "Lost",
+          "Not Interested",
+          "Tired of trying"
+        ]
+      },
+      editable: true,
+      enrichable: false,
+      system: false,
+      order: 3
+    },
+    {
+      label: "Lead Source",
+      key: "lead_source",
+      type: "select",
+      options: {
+        sources: [
+          "LI Search",
+          "Web Search",
+          "Local list",
+          "Job list",
+          "DM",
+          "Email",
+          "Call",
+          "Conference",
+          "Reference",
+          "1-o-1"
+        ]
+      },
+      editable: true,
+      enrichable: false,
+      system: false,
+      order: 4
+    },
+    {
+      label: "Call Outcome",
+      key: "call_outcome",
+      type: "select",
+      options: {
+        outcomes: [
+          "Interested",
+          "Meeting booked",
+          "Call back",
+          "Voicemail",
+          "Message to GK",
+          "Tired of calling",
+          "Req. correction",
+          "Not Interested",
+          "Wrong lead",
+          "Other"
+        ]
+      },
+      editable: true,
+      enrichable: false,
+      system: false,
+      order: 5
+    },
+    {
+      label: "Lead Score",
+      key: "lead_score",
+      type: "number",
+      options: null,
+      editable: true,
+      enrichable: true,
+      system: false,
+      order: 6
+    },
+    {
+      label: "Lead Score Reason",
+      key: "lead_score_reason",
+      type: "text",
+      options: null,
+      editable: true,
+      enrichable: true,
+      system: false,
+      order: 7
+    },
+    {
+      label: "Suggest AI",
+      key: "suggest_ai",
+      type: "long_text",
+      options: null,
+      editable: false,
+      enrichable: true,
+      system: true,
+      order: 8
+    },
+    {
+      label: "Suggest Human",
+      key: "suggest_human",
+      type: "long_text",
+      options: null,
+      editable: true,
+      enrichable: false,
+      system: false,
+      order: 9
+    },
+    {
+      label: "Manual Comment",
+      key: "manual_comment",
+      type: "long_text",
+      options: null,
+      editable: true,
+      enrichable: false,
+      system: false,
+      order: 10
+    }
   ];
 
   for (const f of fields) {
     await pool.query(
-      `INSERT INTO fields
-       (label, key, type, options, editable, enrichable, integration_source, system_derived, order_index)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       ON CONFLICT (key) DO NOTHING`,
-      f
+      `
+      INSERT INTO fields
+        (label, key, type, options, editable, enrichable, system_derived, order_index)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      ON CONFLICT (key) DO NOTHING
+      `,
+      [
+        f.label,
+        f.key,
+        f.type,
+        f.options ? JSON.stringify(f.options) : null,
+        f.editable,
+        f.enrichable,
+        f.system,
+        f.order
+      ]
     );
   }
 }
 
-/* ------------ APIs ------------ */
+/* =======================
+   API ENDPOINTS
+======================= */
 
-// Fetch fields
 app.get("/api/fields", async (req, res) => {
   const { rows } = await pool.query(
     "SELECT * FROM fields WHERE hidden = FALSE ORDER BY order_index"
@@ -107,36 +236,34 @@ app.get("/api/fields", async (req, res) => {
   res.json(rows);
 });
 
-// Fetch leads + values
 app.get("/api/leads", async (req, res) => {
   const { rows: leads } = await pool.query("SELECT * FROM leads");
   const { rows: values } = await pool.query("SELECT * FROM lead_values");
 
   const map = {};
-  leads.forEach(l => map[l.id] = { id: l.id });
+  leads.forEach(l => (map[l.id] = { id: l.id }));
+
   values.forEach(v => {
-    if (map[v.lead_id]) map[v.lead_id][v.field_key] = v.value;
+    if (!map[v.lead_id]) return;
+    map[v.lead_id][v.field_key] = v.value;
   });
 
   res.json(Object.values(map));
 });
 
-// Create new blank lead
 app.post("/api/leads", async (req, res) => {
   const id = uuidv4();
   await pool.query("INSERT INTO leads (id) VALUES ($1)", [id]);
   res.json({ id });
 });
 
-// Update single cell (manual edit)
 app.put("/api/cell", async (req, res) => {
   const { leadId, fieldKey, value } = req.body;
 
   await pool.query(
     `
-    INSERT INTO lead_values
-    (lead_id, field_key, value, source, locked, updated_at)
-    VALUES ($1, $2, $3, 'manual', TRUE, NOW())
+    INSERT INTO lead_values (lead_id, field_key, value, source, locked)
+    VALUES ($1,$2,$3,'manual',TRUE)
     ON CONFLICT (lead_id, field_key)
     DO UPDATE SET
       value = EXCLUDED.value,
@@ -150,10 +277,13 @@ app.put("/api/cell", async (req, res) => {
   res.json({ success: true });
 });
 
-/* ------------ START SERVER ------------ */
+/* =======================
+   START SERVER
+======================= */
+
 init().then(() => {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () =>
-    console.log("CRM running on port", PORT)
-  );
+  app.listen(PORT, () => {
+    console.log("✅ AltoCRM running on port", PORT);
+  });
 });
