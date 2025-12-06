@@ -3,44 +3,18 @@
 <head>
   <title>AltoCRM</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      padding: 20px;
-    }
-
-    table {
-      border-collapse: collapse;
-      width: 100%;
-    }
-
-    th, td {
-      border: 1px solid #ccc;
-      padding: 6px;
-      white-space: nowrap;
-      font-size: 13px;
-    }
-
-    th {
-      background: #f4f4f4;
-      position: sticky;
-      top: 0;
-      z-index: 1;
-    }
-
-    td:hover {
-      background: #fafafa;
-      cursor: pointer;
-    }
-
-    select, input {
-      width: 95%;
-      font-size: 13px;
-    }
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: 6px; font-size: 13px; }
+    th { background: #f4f4f4; position: sticky; top: 0; z-index: 2; }
+    tr.filter-row th { background: #fff; top: 28px; z-index: 1; }
+    input, select { width: 95%; font-size: 12px; }
+    td:hover { background: #fafafa; cursor: pointer; }
   </style>
 </head>
 <body>
 
-<h2>AltoCRM – Inline Editable Grid</h2>
+<h2>AltoCRM – Filterable CRM Grid</h2>
 
 <button onclick="addLead()">➕ Add Lead</button>
 <br><br>
@@ -50,6 +24,7 @@
 <script>
 let fields = [];
 let leads = [];
+let filters = {};
 
 async function load() {
   fields = await fetch("/api/fields").then(r => r.json());
@@ -63,11 +38,23 @@ async function addLead() {
 }
 
 function render() {
+  let filtered = leads.filter(l =>
+    Object.keys(filters).every(key => {
+      if (!filters[key]) return true;
+      const value = (l[key] || "").toLowerCase();
+      return value.includes(filters[key].toLowerCase());
+    })
+  );
+
   let html = "<tr>" +
     fields.map(f => `<th>${f.label}</th>`).join("") +
     "</tr>";
 
-  leads.forEach(l => {
+  html += "<tr class='filter-row'>" +
+    fields.map(f => `<th>${filterControl(f)}</th>`).join("") +
+    "</tr>";
+
+  filtered.forEach(l => {
     html += `<tr data-id="${l.id}">`;
     fields.forEach(f => {
       html += `
@@ -81,6 +68,30 @@ function render() {
   document.getElementById("grid").innerHTML = html;
 }
 
+function filterControl(field) {
+  if (field.type === "select" && field.options) {
+    const opts =
+      field.options.stages ||
+      field.options.sources ||
+      field.options.outcomes ||
+      [];
+
+    return `
+      <select onchange="setFilter('${field.key}', this.value)">
+        <option value="">All</option>
+        ${opts.map(o => `<option value="${o}">${o}</option>`).join("")}
+      </select>
+    `;
+  }
+
+  return `<input placeholder="Filter" oninput="setFilter('${field.key}', this.value)">`;
+}
+
+function setFilter(key, value) {
+  filters[key] = value;
+  render();
+}
+
 function editCell(td) {
   const tr = td.parentElement;
   const leadId = tr.dataset.id;
@@ -90,12 +101,9 @@ function editCell(td) {
 
   td.innerHTML = "";
 
-  // SELECT FIELD → DROPDOWN
   if (field.type === "select" && field.options) {
     const select = document.createElement("select");
-
-    // determine option list from JSONB object
-    const optionList =
+    const list =
       field.options.stages ||
       field.options.sources ||
       field.options.outcomes ||
@@ -103,51 +111,29 @@ function editCell(td) {
 
     select.innerHTML =
       `<option value=""></option>` +
-      optionList.map(o =>
-        `<option value="${o}" ${o === oldValue ? "selected" : ""}>${o}</option>`
-      ).join("");
+      list.map(o => `<option ${o === oldValue ? "selected" : ""}>${o}</option>`).join("");
 
-    select.onchange = () => saveCell(td, leadId, fieldKey, select.value);
-    select.onblur = () => saveCell(td, leadId, fieldKey, select.value);
-
+    select.onchange = () => save(td, leadId, fieldKey, select.value);
+    select.onblur = () => save(td, leadId, fieldKey, select.value);
     td.appendChild(select);
     select.focus();
     return;
   }
 
-  // NUMBER FIELD
-  if (field.type === "number") {
-    const input = document.createElement("input");
-    input.type = "number";
-    input.value = oldValue;
-
-    input.onblur = () => saveCell(td, leadId, fieldKey, input.value);
-    input.onkeydown = e => e.key === "Enter" && input.blur();
-
-    td.appendChild(input);
-    input.focus();
-    return;
-  }
-
-  // TEXT / LONG TEXT FIELD
   const input = document.createElement("input");
-  input.type = "text";
   input.value = oldValue;
-
-  input.onblur = () => saveCell(td, leadId, fieldKey, input.value);
+  input.onblur = () => save(td, leadId, fieldKey, input.value);
   input.onkeydown = e => e.key === "Enter" && input.blur();
-
   td.appendChild(input);
   input.focus();
 }
 
-async function saveCell(td, leadId, fieldKey, value) {
+async function save(td, leadId, fieldKey, value) {
   await fetch("/api/cell", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ leadId, fieldKey, value })
   });
-
   td.innerText = value || "";
 }
 
