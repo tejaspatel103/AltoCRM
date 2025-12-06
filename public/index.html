@@ -3,19 +3,39 @@
 <head>
   <title>AltoCRM</title>
   <style>
-    body { font-family: Arial; padding: 20px; }
-    table { border-collapse: collapse; width: 100%; }
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+
     th, td {
       border: 1px solid #ccc;
       padding: 6px;
       white-space: nowrap;
+      font-size: 13px;
     }
+
     th {
       background: #f4f4f4;
       position: sticky;
       top: 0;
+      z-index: 1;
     }
-    td:hover { background: #fafafa; cursor: pointer; }
+
+    td:hover {
+      background: #fafafa;
+      cursor: pointer;
+    }
+
+    select, input {
+      width: 95%;
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -65,35 +85,70 @@ function editCell(td) {
   const tr = td.parentElement;
   const leadId = tr.dataset.id;
   const fieldKey = td.dataset.field;
-  const oldVal = td.innerText;
-
-  const input = document.createElement("input");
-  input.value = oldVal;
-  input.style.width = "95%";
-
-  input.onblur = async () => {
-    const newVal = input.value;
-    td.innerText = newVal;
-
-    await fetch("/api/cell", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        leadId,
-        fieldKey,
-        value: newVal
-      })
-    });
-  };
-
-  input.onkeydown = e => {
-    if (e.key === "Enter") input.blur();
-    if (e.key === "Escape") td.innerText = oldVal;
-  };
+  const field = fields.find(f => f.key === fieldKey);
+  const oldValue = td.innerText;
 
   td.innerHTML = "";
+
+  // SELECT FIELD → DROPDOWN
+  if (field.type === "select" && field.options) {
+    const select = document.createElement("select");
+
+    // determine option list from JSONB object
+    const optionList =
+      field.options.stages ||
+      field.options.sources ||
+      field.options.outcomes ||
+      [];
+
+    select.innerHTML =
+      `<option value=""></option>` +
+      optionList.map(o =>
+        `<option value="${o}" ${o === oldValue ? "selected" : ""}>${o}</option>`
+      ).join("");
+
+    select.onchange = () => saveCell(td, leadId, fieldKey, select.value);
+    select.onblur = () => saveCell(td, leadId, fieldKey, select.value);
+
+    td.appendChild(select);
+    select.focus();
+    return;
+  }
+
+  // NUMBER FIELD
+  if (field.type === "number") {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.value = oldValue;
+
+    input.onblur = () => saveCell(td, leadId, fieldKey, input.value);
+    input.onkeydown = e => e.key === "Enter" && input.blur();
+
+    td.appendChild(input);
+    input.focus();
+    return;
+  }
+
+  // TEXT / LONG TEXT FIELD
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = oldValue;
+
+  input.onblur = () => saveCell(td, leadId, fieldKey, input.value);
+  input.onkeydown = e => e.key === "Enter" && input.blur();
+
   td.appendChild(input);
   input.focus();
+}
+
+async function saveCell(td, leadId, fieldKey, value) {
+  await fetch("/api/cell", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ leadId, fieldKey, value })
+  });
+
+  td.innerText = value || "";
 }
 
 load();
