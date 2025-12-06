@@ -4,14 +4,22 @@
   <title>AltoCRM</title>
   <style>
     body { font-family: Arial; padding: 30px; }
-    input, button { padding: 8px; margin: 4px; }
+    input, select, button { padding: 8px; margin: 4px; }
     table { border-collapse: collapse; margin-top: 12px; width: 100%; }
     th, td { border: 1px solid #ccc; padding: 8px; }
+    th { background: #f4f4f4; }
   </style>
 </head>
 <body>
 
 <h2>AltoCRM</h2>
+
+<input id="search" placeholder="Search name, email, company">
+<select id="sort">
+  <option value="new">Newest First</option>
+  <option value="old">Oldest First</option>
+  <option value="name">Name A–Z</option>
+</select>
 
 <form id="f">
   <input id="n" placeholder="Full Name">
@@ -22,15 +30,22 @@
 
 <table>
 <thead>
-<tr><th>Name</th><th>Email</th><th>Company</th></tr>
+<tr>
+  <th>Name</th>
+  <th>Email</th>
+  <th>Company</th>
+</tr>
 </thead>
 <tbody id="t"></tbody>
 </table>
 
 <script>
 async function load(){
-  const r = await fetch('/api/leads');
+  const q = search.value;
+  const s = sort.value;
+  const r = await fetch('/api/leads?q=' + encodeURIComponent(q) + '&sort=' + s);
   const d = await r.json();
+
   t.innerHTML = d.map(x =>
     `<tr>
       <td>${x.full_name}</td>
@@ -55,6 +70,8 @@ f.onsubmit = async e=>{
   load();
 };
 
+search.oninput = load;
+sort.onchange = load;
 load();
 </script>
 
