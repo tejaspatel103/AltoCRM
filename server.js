@@ -64,9 +64,7 @@ app.get("/api/leads", async (req, res) => {
     }
 
     const whereClause =
-      filters.length > 0
-        ? `AND ${filters.join(" AND ")}`
-        : "";
+      filters.length > 0 ? `AND ${filters.join(" AND ")}` : "";
 
     const query = `
       SELECT *
@@ -85,7 +83,7 @@ app.get("/api/leads", async (req, res) => {
 });
 
 /* ======================
-   CREATE LEAD (MINIMAL)
+   CREATE LEAD
 ====================== */
 app.post("/api/leads", async (req, res) => {
   try {
@@ -126,20 +124,22 @@ app.patch("/api/leads/:id", async (req, res) => {
     }
 
     const setClause = fields
-      .map((field, index) => `${field} = $${index + 1}`)
+      .map((field, i) => `${field} = $${i + 1}`)
       .join(", ");
 
     const values = Object.values(req.body);
 
-    const query = `
+    const result = await pool.query(
+      `
       UPDATE leads
       SET ${setClause}, updated_at = now()
       WHERE id = $${fields.length + 1}
       AND deleted = false
       RETURNING *
-    `;
+      `,
+      [...values, id]
+    );
 
-    const result = await pool.query(query, [...values, id]);
     res.json(result.rows[0]);
   } catch (err) {
     console.error("UPDATE LEAD ERROR:", err.message);
@@ -148,29 +148,24 @@ app.patch("/api/leads/:id", async (req, res) => {
 });
 
 /* ======================
-   UPDATE PIPELINE (VALIDATED)
+   UPDATE PIPELINE (SINGLE)
 ====================== */
 app.patch("/api/leads/:id/pipeline", async (req, res) => {
   try {
-    const { id } = req.params;
     const { pipeline } = req.body;
 
     if (!PIPELINE_STAGES.includes(pipeline)) {
-      return res.status(400).json({
-        error: "Invalid pipeline stage",
-        allowed: PIPELINE_STAGES
-      });
+      return res.status(400).json({ error: "Invalid pipeline" });
     }
 
     const result = await pool.query(
       `
       UPDATE leads
       SET pipeline = $1, updated_at = now()
-      WHERE id = $2
-      AND deleted = false
+      WHERE id = $2 AND deleted = false
       RETURNING *
       `,
-      [pipeline, id]
+      [pipeline, req.params.id]
     );
 
     res.json(result.rows[0]);
@@ -181,169 +176,162 @@ app.patch("/api/leads/:id/pipeline", async (req, res) => {
 });
 
 /* ======================
-   PIPELINE SUMMARY (COUNTS)
+   BULK UPDATE (FIELDS)
 ====================== */
-app.get("/api/pipeline/summary", async (req, res) => {
+app.patch("/api/leads/bulk", async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT pipeline, COUNT(*) AS count
-      FROM leads
-      WHERE deleted = false
-      GROUP BY pipeline
-      ORDER BY pipeline
-    `);
+    const { ids, filters, updates } = req.body;
 
-    res.json(result.rows);
-  } catch (err) {
-    console.error("PIPELINE SUMMARY ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+    if (!updates || Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "No updates provided" });
+    }
 
-/* ======================
-   DASHBOARD: PIPELINE KANBAN
-====================== */
-app.get("/api/dashboard/pipeline", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT *
-      FROM leads
-      WHERE deleted = false
-      ORDER BY created_at DESC
-    `);
+    const setFields = Object.keys(updates);
+    const setClause = setFields
+      .map((f, i) => `${f} = $${i + 1}`)
+      .join(", ");
 
-    const grouped = {};
+    const values = Object.values(updates);
+    let whereClause = "deleted = false";
+    let index = values.length;
 
-    result.rows.forEach(lead => {
-      const stage = lead.pipeline || "Unassigned";
-      if (!grouped[stage]) grouped[stage] = [];
-      grouped[stage].push(lead);
-    });
+    if (ids && ids.length > 0) {
+      whereClause += ` AND id = ANY($${index + 1})`;
+      values.push(ids);
+    }
 
-    res.json(grouped);
-  } catch (err) {
-    console.error("DASHBOARD PIPELINE ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ======================
-   DASHBOARD: STATS (CARDS)
-====================== */
-app.get("/api/dashboard/stats", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT
-        COUNT(*) FILTER (WHERE deleted = false) AS total_leads,
-        COUNT(*) FILTER (WHERE deleted = false AND created_at::date = CURRENT_DATE) AS new_today,
-        COUNT(*) FILTER (WHERE deleted = false AND (email1 IS NULL OR email1 = '')) AS missing_email,
-        COUNT(*) FILTER (WHERE deleted = false AND (pipeline IS NULL OR pipeline = '')) AS missing_pipeline,
-        COUNT(*) FILTER (WHERE deleted = false AND pipeline = 'Won') AS won,
-        COUNT(*) FILTER (WHERE deleted = false AND pipeline = 'Lost') AS lost
-      FROM leads
-    `);
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("DASHBOARD STATS ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ======================
-   DASHBOARD: NEXT ACTIONS
-====================== */
-app.get("/api/dashboard/next-actions", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT *
-      FROM leads
-      WHERE deleted = false
-      AND next_action_date IS NOT NULL
-      ORDER BY next_action_date ASC
-      LIMIT 50
-    `);
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error("NEXT ACTION ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ======================
-   SOFT DELETE LEAD
-====================== */
-app.delete("/api/leads/:id", async (req, res) => {
-  try {
-    await pool.query(
-      `
-      UPDATE leads
-      SET deleted = true, updated_at = now()
-      WHERE id = $1
-      `,
-      [req.params.id]
-    );
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error("DELETE LEAD ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ======================
-   ACTION LOG
-====================== */
-app.post("/api/leads/:id/actions", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { user_id, action_type, comment, lead_status } = req.body;
+    if (filters) {
+      for (const [field, value] of Object.entries(filters)) {
+        if (value === "__blank__") {
+          whereClause += ` AND (${field} IS NULL OR ${field} = '')`;
+        } else {
+          index++;
+          whereClause += ` AND ${field} = $${index}`;
+          values.push(value);
+        }
+      }
+    }
 
     const result = await pool.query(
       `
-      INSERT INTO lead_actions (
-        lead_id,
-        user_id,
-        action_type,
-        comment,
-        lead_status
-      )
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING *
+      UPDATE leads
+      SET ${setClause}, updated_at = now()
+      WHERE ${whereClause}
+      RETURNING id
       `,
-      [id, user_id, action_type, comment, lead_status]
+      values
     );
 
-    res.json(result.rows[0]);
+    res.json({ updated: result.rowCount });
   } catch (err) {
-    console.error("ACTION LOG ERROR:", err.message);
+    console.error("BULK UPDATE ERROR:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 /* ======================
-   ASSIGN USER TO LEAD
+   BULK PIPELINE MOVE
 ====================== */
-app.post("/api/leads/:id/assign", async (req, res) => {
+app.patch("/api/leads/bulk/pipeline", async (req, res) => {
   try {
-    const { id } = req.params;
-    const { user_id } = req.body;
+    const { ids, pipeline } = req.body;
 
-    await pool.query(
+    if (!PIPELINE_STAGES.includes(pipeline)) {
+      return res.status(400).json({ error: "Invalid pipeline" });
+    }
+
+    const result = await pool.query(
       `
-      INSERT INTO lead_assignments (lead_id, user_id)
-      VALUES ($1, $2)
-      ON CONFLICT DO NOTHING
+      UPDATE leads
+      SET pipeline = $1, updated_at = now()
+      WHERE id = ANY($2) AND deleted = false
       `,
-      [id, user_id]
+      [pipeline, ids]
     );
 
-    res.json({ success: true });
+    res.json({ updated: result.rowCount });
   } catch (err) {
-    console.error("ASSIGN LEAD ERROR:", err.message);
+    console.error("BULK PIPELINE ERROR:", err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+/* ======================
+   BULK DELETE
+====================== */
+app.delete("/api/leads/bulk", async (req, res) => {
+  try {
+    const { ids } = req.body;
+
+    const result = await pool.query(
+      `
+      UPDATE leads
+      SET deleted = true, updated_at = now()
+      WHERE id = ANY($1)
+      `,
+      [ids]
+    );
+
+    res.json({ deleted: result.rowCount });
+  } catch (err) {
+    console.error("BULK DELETE ERROR:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ======================
+   BULK ENRICH (AI / HUMAN STUB)
+====================== */
+app.post("/api/leads/bulk/enrich", async (req, res) => {
+  const { ids, mode, fields } = req.body;
+
+  res.json({
+    status: "queued",
+    mode,
+    fields,
+    leads: ids?.length || 0
+  });
+});
+
+/* ======================
+   PIPELINE SUMMARY
+====================== */
+app.get("/api/pipeline/summary", async (req, res) => {
+  const result = await pool.query(`
+    SELECT pipeline, COUNT(*) AS count
+    FROM leads
+    WHERE deleted = false
+    GROUP BY pipeline
+  `);
+  res.json(result.rows);
+});
+
+/* ======================
+   DASHBOARD ENDPOINTS
+====================== */
+app.get("/api/dashboard/pipeline", async (_, res) => {
+  const result = await pool.query(`
+    SELECT * FROM leads WHERE deleted = false
+  `);
+
+  const grouped = {};
+  result.rows.forEach(l => {
+    grouped[l.pipeline || "Unassigned"] ||= [];
+    grouped[l.pipeline || "Unassigned"].push(l);
+  });
+
+  res.json(grouped);
+});
+
+app.get("/api/dashboard/stats", async (_, res) => {
+  const result = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE deleted=false) AS total,
+      COUNT(*) FILTER (WHERE pipeline='Won') AS won,
+      COUNT(*) FILTER (WHERE pipeline='Lost') AS lost
+    FROM leads
+  `);
+  res.json(result.rows[0]);
 });
 
 /* ======================
