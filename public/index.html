@@ -4,168 +4,140 @@
   <meta charset="UTF-8" />
   <title>AltoCRM</title>
   <style>
-    body { font-family: Arial; padding: 12px; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ccc; padding: 6px; }
-    th { background: #f3f3f3; position: sticky; top: 0; }
-    select, input, textarea { width: 100%; }
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+    th, td { border: 1px solid #ccc; padding: 6px; font-size: 13px; }
+    th { background: #f4f4f4; position: sticky; top: 0; }
+    input, select, textarea { width: 100%; font-size: 13px; }
     textarea { resize: vertical; }
-    .toolbar { margin-bottom: 12px; }
+    button { margin-right: 5px; }
   </style>
 </head>
+
 <body>
+  <h2>AltoCRM</h2>
 
-<h2>AltoCRM</h2>
-
-<div class="toolbar">
   <button onclick="addLead()">➕ Add Lead</button>
-  <button onclick="deleteSelected()">🗑 Delete Selected</button>
-</div>
+  <button onclick="deleteSelected()">🗑️ Delete Selected</button>
 
-<div id="filters"></div>
-
-<table>
-  <thead>
-    <tr id="header-row"></tr>
-  </thead>
-  <tbody id="rows"></tbody>
-</table>
+  <table>
+    <thead>
+      <tr id="header-row"></tr>
+    </thead>
+    <tbody id="table-body"></tbody>
+  </table>
 
 <script>
 let fields = [];
 let leads = [];
-let values = [];
-let activeFilters = {};
 
-async function loadData() {
-  fields = await fetch('/api/fields').then(r => r.json());
-  const data = await fetch('/api/leads').then(r => r.json());
-  leads = data.leads;
-  values = data.values;
-  buildFilters();
-  renderTable();
-}
+/* ✅ LOAD FIELDS */
+fetch('/api/fields')
+  .then(r => r.json())
+  .then(data => {
+    fields = data.sort((a,b) => a.order_index - b.order_index);
+    renderHeader();
+    loadLeads();
+  });
 
-function getValue(leadId, key) {
-  const v = values.find(x => x.lead_id === leadId && x.field_key === key);
-  return v ? v.value : '';
-}
-
-function buildFilters() {
-  const container = document.getElementById('filters');
-  container.innerHTML = '';
-
+/* ✅ HEADER */
+function renderHeader() {
+  const tr = document.getElementById('header-row');
+  tr.innerHTML = `<th><input type="checkbox" onclick="toggleAll(this)"></th>`;
   fields.forEach(f => {
-    const wrap = document.createElement('div');
-    wrap.innerHTML = `<strong>${f.label}</strong><br/>`;
-    const select = document.createElement('select');
-
-    select.innerHTML = `<option value="">-- All --</option>
-                        <option value="__BLANK__">(Blank)</option>`;
-
-    const uniqueVals = [...new Set(values
-      .filter(v => v.field_key === f.key && v.value)
-      .map(v => v.value))];
-
-    uniqueVals.forEach(v => {
-      const o = document.createElement('option');
-      o.value = v;
-      o.textContent = v;
-      select.appendChild(o);
-    });
-
-    select.onchange = () => {
-      if (select.value === '') delete activeFilters[f.key];
-      else activeFilters[f.key] = select.value;
-      renderTable();
-    };
-
-    wrap.appendChild(select);
-    container.appendChild(wrap);
+    tr.innerHTML += `<th>${f.label}</th>`;
   });
 }
 
-function renderTable() {
-  const header = document.getElementById('header-row');
-  const body = document.getElementById('rows');
-  header.innerHTML = '';
-  body.innerHTML = '';
+/* ✅ LOAD LEADS */
+function loadLeads() {
+  fetch('/api/leads')
+    .then(r => r.json())
+    .then(data => {
+      leads = data;
+      renderRows();
+    });
+}
 
-  header.innerHTML += `<th><input type="checkbox" onclick="toggleAll(this)"></th>`;
-  fields.forEach(f => header.innerHTML += `<th>${f.label}</th>`);
-  header.innerHTML += `<th>Action</th>`;
+/* ✅ RENDER ROWS */
+function renderRows() {
+  const tbody = document.getElementById('table-body');
+  tbody.innerHTML = '';
 
-  leads.forEach(l => {
-    if (!passesFilters(l.id)) return;
-
+  leads.forEach(lead => {
     const tr = document.createElement('tr');
-    tr.innerHTML += `<td><input type="checkbox" class="rowcheck" data-id="${l.id}"></td>`;
+
+    tr.innerHTML = `
+      <td><input type="checkbox" class="row-check" data-id="${lead.id}"></td>
+    `;
 
     fields.forEach(f => {
-      const val = getValue(l.id, f.key);
+      const value = lead[f.key] ?? '';
       let cell = '';
 
-      if (f.type === 'select' && f.options) {
-        const opts = Object.values(f.options)[0] || [];
-        cell = `<select data-id="${l.id}" data-key="${f.key}">
-          <option value=""></option>
-          ${opts.map(o => `<option ${o===val?'selected':''}>${o}</option>`).join('')}
-        </select>`;
-      } else if (f.type === 'long_text') {
-        cell = `<textarea data-id="${l.id}" data-key="${f.key}">${val||''}</textarea>`;
-      } else {
-        cell = `<input value="${val||''}" data-id="${l.id}" data-key="${f.key}">`;
+      if (f.type === 'select') {
+        const opts =
+          (f.options?.stages || f.options?.sources || f.options?.outcomes || []);
+        cell = `
+          <select onchange="updateCell('${lead.id}','${f.key}',this.value)">
+            <option value=""></option>
+            ${opts.map(o =>
+              `<option ${o === value ? 'selected' : ''}>${o}</option>`
+            ).join('')}
+          </select>`;
+      }
+      else if (f.type === 'long_text') {
+        cell = `<textarea onchange="updateCell('${lead.id}','${f.key}',this.value)">${value}</textarea>`;
+      }
+      else {
+        cell = `<input value="${value}" onchange="updateCell('${lead.id}','${f.key}',this.value)">`;
       }
 
       tr.innerHTML += `<td>${cell}</td>`;
     });
 
-    tr.innerHTML += `<td>
-      <button onclick="deleteLead('${l.id}')">Delete</button>
-    </td>`;
-
-    body.appendChild(tr);
+    tbody.appendChild(tr);
   });
 }
 
-function passesFilters(leadId) {
-  return Object.entries(activeFilters).every(([key,val]) => {
-    const v = getValue(leadId, key);
-    if (val === '__BLANK__') return !v;
-    return v === val;
+/* ✅ ADD LEAD */
+function addLead() {
+  fetch('/api/leads', { method: 'POST' })
+    .then(() => loadLeads());
+}
+
+/* ✅ UPDATE CELL */
+function updateCell(leadId, fieldKey, value) {
+  fetch('/api/leads/value', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      lead_id: leadId,
+      field_key: fieldKey,
+      value,
+      source: 'manual'
+    })
   });
+}
+
+/* ✅ DELETE */
+function deleteSelected() {
+  const ids = [...document.querySelectorAll('.row-check:checked')]
+    .map(cb => cb.dataset.id);
+
+  if (!ids.length) return alert('Select at least one lead');
+
+  fetch('/api/leads/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids })
+  }).then(() => loadLeads());
 }
 
 function toggleAll(cb) {
-  document.querySelectorAll('.rowcheck').forEach(c => c.checked = cb.checked);
+  document.querySelectorAll('.row-check')
+    .forEach(c => c.checked = cb.checked);
 }
-
-async function addLead() {
-  await fetch('/api/leads', { method: 'POST' });
-  loadData();
-}
-
-async function deleteLead(id) {
-  if (!confirm('Delete this lead?')) return;
-  await fetch('/api/leads/' + id, { method: 'DELETE' });
-  loadData();
-}
-
-async function deleteSelected() {
-  const ids = [...document.querySelectorAll('.rowcheck')]
-    .filter(c => c.checked)
-    .map(c => c.dataset.id);
-
-  if (!ids.length) return;
-  if (!confirm(`Delete ${ids.length} leads?`)) return;
-
-  for (const id of ids) {
-    await fetch('/api/leads/' + id, { method: 'DELETE' });
-  }
-  loadData();
-}
-
-loadData();
 </script>
 </body>
 </html>
