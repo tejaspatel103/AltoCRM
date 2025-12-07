@@ -1,7 +1,6 @@
 {
   "name": "alto-crm",
   "version": "1.0.0",
-  "description": "AltoCRM backend API",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -11,11 +10,14 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "cors": "^2.8.5",
-    "pg": "^8.11.5",
-    "multer": "^1.4.5-lts.1",
     "csv-parser": "^3.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.11.5",
+    "uuid": "^9.0.1",
     "json2csv": "^5.0.7"
   }
 }
