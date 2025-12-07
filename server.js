@@ -9,7 +9,9 @@ app.use(express.static('public'));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === 'production'
+    ? { rejectUnauthorized: false }
+    : false
 });
 
 /* ------------------ HEALTH CHECK ------------------ */
@@ -38,40 +40,84 @@ app.get('/api/fields', async (_req, res) => {
   }
 });
 
-/* ------------------ GET LEADS ------------------ */
+/* ------------------ ✅ FIXED: GET LEADS ------------------ */
 app.get('/api/leads', async (_req, res) => {
   try {
-    const leads = await pool.query(`
-      SELECT id
-      FROM leads
-      WHERE deleted_at IS NULL
-      ORDER BY created_at DESC
+    const result = await pool.query(`
+      SELECT
+        l.id AS lead_id,
+        f.key AS field_key,
+        lv.value
+      FROM leads l
+      LEFT JOIN leads_value lv ON lv.lead_id = l.id
+      LEFT JOIN fields f ON f.key = lv.field_key
+      WHERE l.deleted_at IS NULL
+      ORDER BY l.created_at DESC
     `);
 
-    const values = await pool.query(`
-      SELECT lead_id, field_key, value
-      FROM leads_value
-    `);
+    const leadsMap = {};
 
-    res.json({
-      leads: leads.rows,
-      values: values.rows
+    result.rows.forEach(row => {
+      if (!leadsMap[row.lead_id]) {
+        leadsMap[row.lead_id] = { id: row.lead_id };
+      }
+      if (row.field_key) {
+        leadsMap[row.lead_id][row.field_key] = row.value ?? '';
+      }
     });
+
+    res.json(Object.values(leadsMap));
   } catch (err) {
     console.error('LEADS ERROR:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ------------------ CREATE LEAD ------------------ */
+/* ------------------ ✅ FIXED: CREATE LEAD ------------------ */
 app.post('/api/leads', async (_req, res) => {
+  const client = await pool.connect();
   try {
-    const id = uuid();
-    await pool.query(`INSERT INTO leads (id) VALUES ($1)`, [id]);
-    res.json({ id });
+    await client.query('BEGIN');
+
+    const leadId = uuid();
+
+    await client.query(
+      `INSERT INTO leads (id) VALUES ($1)`,
+      [leadId]
+    );
+
+    const fields = await client.query(
+      `SELECT key FROM fields WHERE hidden = false`
+    );
+
+    for (const f of fields.rows) {
+      await client.query(
+        `
+        INSERT INTO leads_value
+          (lead_id, field_key, value, source, locked)
+        VALUES
+          ($1, $2, '', 'manual', false)
+        `,
+        [leadId, f.key]
+      );
+    }
+
+    await client.query(
+      `
+      INSERT INTO action_log (lead_id, action_type, details)
+      VALUES ($1,'create','Lead created')
+      `,
+      [leadId]
+    );
+
+    await client.query('COMMIT');
+    res.json({ id: leadId });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('CREATE LEAD ERROR:', err);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -118,8 +164,10 @@ app.post('/api/leads/delete', async (req, res) => {
 
     for (const id of ids) {
       await pool.query(
-        `INSERT INTO action_log (lead_id, action_type, details)
-         VALUES ($1,'delete','Lead deleted')`,
+        `
+        INSERT INTO action_log (lead_id, action_type, details)
+        VALUES ($1,'delete','Lead deleted')
+        `,
         [id]
       );
     }
