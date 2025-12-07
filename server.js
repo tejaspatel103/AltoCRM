@@ -45,11 +45,11 @@ app.get('/api/fields', async (_req, res) => {
 /* ------------------ GET LEADS (EAV FORMAT) ------------------ */
 app.get('/api/leads', async (_req, res) => {
   try {
+    // No deleted_at column in current schema, so just return all leads
     const leads = await pool.query(`
       SELECT id
       FROM leads
-      WHERE deleted_at IS NULL
-      ORDER BY created_at DESC
+      ORDER BY id DESC
     `);
 
     const values = await pool.query(`
@@ -75,11 +75,13 @@ app.post('/api/leads', async (_req, res) => {
 
     const leadId = uuid();
 
+    // Create lead row (id only, matches your current schema)
     await client.query(
       `INSERT INTO leads (id) VALUES ($1)`,
       [leadId]
     );
 
+    // Initialize all visible fields with blank values
     const fields = await client.query(
       `SELECT key FROM fields WHERE hidden = false`
     );
@@ -94,6 +96,7 @@ app.post('/api/leads', async (_req, res) => {
       );
     }
 
+    // Log creation
     await client.query(
       `
       INSERT INTO action_log (lead_id, action_type, details)
@@ -146,18 +149,29 @@ app.post('/api/lead-value', async (req, res) => {
   }
 });
 
-/* ------------------ DELETE LEADS (SOFT + LOGGED) ------------------ */
+/* ------------------ DELETE LEADS (HARD DELETE + LOG) ------------------ */
 app.post('/api/leads/delete', async (req, res) => {
   const { ids } = req.body;
+  const client = await pool.connect();
 
   try {
-    await pool.query(
-      `UPDATE leads SET deleted_at = now() WHERE id = ANY($1)`,
+    await client.query('BEGIN');
+
+    // Remove all values for these leads
+    await client.query(
+      `DELETE FROM leads_value WHERE lead_id = ANY($1)`,
       [ids]
     );
 
+    // Delete leads
+    await client.query(
+      `DELETE FROM leads WHERE id = ANY($1)`,
+      [ids]
+    );
+
+    // Log deletions
     for (const id of ids) {
-      await pool.query(
+      await client.query(
         `
         INSERT INTO action_log (lead_id, action_type, details)
         VALUES ($1,'delete','Lead deleted')
@@ -166,10 +180,14 @@ app.post('/api/leads/delete', async (req, res) => {
       );
     }
 
+    await client.query('COMMIT');
     res.json({ success: true });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('DELETE ERROR:', err);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
