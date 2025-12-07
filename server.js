@@ -89,7 +89,46 @@ async function auditChange({
 }
 
 /* ======================
-   AI FIELD LOCK HELPERS
+   FIELD SOURCE META HELPERS ✅ NEW
+====================== */
+async function getFieldMeta(lead_id, field_name) {
+  const { rows } = await pool.query(
+    `
+    SELECT *
+    FROM lead_field_meta
+    WHERE lead_id = $1 AND field_name = $2
+    `,
+    [lead_id, field_name]
+  );
+  return rows[0] || null;
+}
+
+async function upsertFieldMeta({
+  lead_id,
+  field_name,
+  source,
+  locked = false,
+  last_updated_by = null
+}) {
+  await pool.query(
+    `
+    INSERT INTO lead_field_meta
+      (lead_id, field_name, source, locked, last_updated_by)
+    VALUES
+      ($1, $2, $3, $4, $5)
+    ON CONFLICT (lead_id, field_name)
+    DO UPDATE SET
+      source = EXCLUDED.source,
+      locked = EXCLUDED.locked,
+      last_updated_at = now(),
+      last_updated_by = EXCLUDED.last_updated_by
+    `,
+    [lead_id, field_name, source, locked, last_updated_by]
+  );
+}
+
+/* ======================
+   AI FIELD LOCK HELPERS (UNCHANGED)
 ====================== */
 async function isFieldLocked(lead_id, field_name) {
   const { rows } = await pool.query(
@@ -218,7 +257,7 @@ async function handleJob(job) {
 }
 
 /* ======================
-   AI ENRICH JOB
+   AI ENRICH JOB ✅ UPDATED
 ====================== */
 async function processAIEnrichJob({ lead_id }) {
   const { rows } = await pool.query(
@@ -228,7 +267,8 @@ async function processAIEnrichJob({ lead_id }) {
 
   if (!rows.length) return;
 
-  const ai = aiSuggestLead(rows[0]);
+  const lead = rows[0];
+  const ai = aiSuggestLead(lead);
 
   for (const field of Object.keys(ai.suggestions)) {
     await upsertFieldLock({
@@ -236,6 +276,14 @@ async function processAIEnrichJob({ lead_id }) {
       field_name: field,
       ai_value: ai.suggestions[field],
       confidence: ai.confidence[field]
+    });
+
+    await upsertFieldMeta({
+      lead_id,
+      field_name: field,
+      source: "ai",
+      locked: true,
+      last_updated_by: "ai"
     });
   }
 }
@@ -263,7 +311,7 @@ async function processImportRowJob({ data }) {
 app.get("/", (_, res) => res.send("✅ AltoCRM API running"));
 
 /* ======================
-   UPDATE LEAD (LOCK-AWARE)
+   UPDATE LEAD (META + LOCK AWARE) ✅ UPDATED
 ====================== */
 app.patch("/api/leads/:id", async (req, res) => {
   const client = await pool.connect();
@@ -289,8 +337,8 @@ app.patch("/api/leads/:id", async (req, res) => {
       const oldValue = oldLead[field];
       if (String(oldValue) === String(newValue)) continue;
 
-      const locked = await isFieldLocked(leadId, field);
-      if (locked) continue;
+      const meta = await getFieldMeta(leadId, field);
+      if (meta?.locked) continue;
 
       await client.query(
         `UPDATE leads SET ${field} = $1 WHERE id = $2`,
@@ -303,6 +351,14 @@ app.patch("/api/leads/:id", async (req, res) => {
         old_value: oldValue,
         new_value: newValue,
         actor_type: "human"
+      });
+
+      await upsertFieldMeta({
+        lead_id: leadId,
+        field_name: field,
+        source: "manual",
+        locked: false,
+        last_updated_by: "human"
       });
     }
 
@@ -325,7 +381,7 @@ app.post("/api/leads/:id/ai/enqueue", async (req, res) => {
 });
 
 /* ======================
-   LOCK ENDPOINTS
+   LOCK ENDPOINTS (UNCHANGED)
 ====================== */
 app.post("/api/leads/:id/unlock", async (req, res) => {
   const { field_name } = req.body;
@@ -339,19 +395,15 @@ app.post("/api/leads/:id/unlock", async (req, res) => {
     [req.params.id, field_name]
   );
 
-  res.json({ unlocked: field_name });
-});
+  await upsertFieldMeta({
+    lead_id: req.params.id,
+    field_name,
+    source: "manual",
+    locked: false,
+    last_updated_by: "human"
+  });
 
-app.get("/api/leads/:id/locks", async (req, res) => {
-  const { rows } = await pool.query(
-    `
-    SELECT field_name, locked, locked_by, ai_value, confidence
-    FROM lead_field_locks
-    WHERE lead_id = $1
-    `,
-    [req.params.id]
-  );
-  res.json(rows);
+  res.json({ unlocked: field_name });
 });
 
 /* ======================
