@@ -5,22 +5,13 @@ import pkg from "pg";
 const { Pool } = pkg;
 
 const app = express();
-
-/* ======================
-   MIDDLEWARE
-====================== */
 app.use(cors());
 app.use(express.json());
 
-/* ======================
-   DATABASE
-====================== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-
-const LEADS_TABLE = `"Leads_value"`;
 
 /* ======================
    HEALTH CHECK
@@ -30,16 +21,16 @@ app.get("/", (req, res) => {
 });
 
 /* ======================
-   GET ALL LEADS
+   GET LEADS (exclude deleted)
 ====================== */
 app.get("/api/leads", async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT * FROM ${LEADS_TABLE} ORDER BY created_at DESC`
+      `SELECT * FROM leads WHERE deleted = false ORDER BY created_at DESC`
     );
     res.json(result.rows);
   } catch (err) {
-    console.error("GET LEADS ERROR:", err.message);
+    console.error(err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -49,45 +40,37 @@ app.get("/api/leads", async (req, res) => {
 ====================== */
 app.post("/api/leads", async (req, res) => {
   try {
-    const {
-      full_name,
-      company,
-      email1,
-      phone1,
-      pipeline,
-      lead_source
-    } = req.body;
+    const { full_name, email, company } = req.body;
 
     const result = await pool.query(
       `
-      INSERT INTO ${LEADS_TABLE}
-      (full_name, company, email1, phone1, pipeline, lead_source)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO leads (full_name, email, company)
+      VALUES ($1, $2, $3)
       RETURNING *
       `,
-      [full_name, company, email1, phone1, pipeline, lead_source]
+      [full_name, email, company]
     );
 
     res.json(result.rows[0]);
   } catch (err) {
-    console.error("CREATE LEAD ERROR:", err.message);
+    console.error(err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 /* ======================
-   DELETE LEAD
+   SOFT DELETE LEAD
 ====================== */
 app.delete("/api/leads/:id", async (req, res) => {
   try {
     await pool.query(
-      `DELETE FROM ${LEADS_TABLE} WHERE id = $1`,
+      `UPDATE leads SET deleted = true WHERE id = $1`,
       [req.params.id]
     );
 
     res.json({ success: true });
   } catch (err) {
-    console.error("DELETE LEAD ERROR:", err.message);
+    console.error(err.message);
     res.status(500).json({ error: err.message });
   }
 });
