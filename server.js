@@ -9,141 +9,113 @@ app.use(express.static('public'));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
 /* ------------------ HEALTH ------------------ */
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true });
-});
+app.get('/api/health', (_, res) => res.json({ ok: true }));
 
 /* ------------------ FIELDS ------------------ */
-app.get('/api/fields', async (_req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT label, key, type, options, editable, enrichable, order_index
-      FROM public.fields
-      WHERE hidden = false
-      ORDER BY order_index
-    `);
-    res.json(result.rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+app.get('/api/fields', async (_, res) => {
+  const { rows } = await pool.query(`
+    SELECT label, key, type, options, editable, enrichable, order_index
+    FROM fields
+    WHERE hidden = false
+    ORDER BY order_index
+  `);
+  res.json(rows);
 });
 
-/* ------------------ GET LEADS (FIXED) ------------------ */
-app.get('/api/leads', async (_req, res) => {
+/* ------------------ GET LEADS (SAFE MODE) ------------------ */
+app.get('/api/leads', async (_, res) => {
   try {
-    const rows = await pool.query(`
-      SELECT
-        l.id AS lead_id,
-        v.field_key,
-        v.value
-      FROM public.leads l
-      LEFT JOIN public.leads_value v ON v.lead_id = l.id
-      ORDER BY l.id DESC
+    const leads = await pool.query(`
+      SELECT DISTINCT lead_id AS id
+      FROM leads_value
+      ORDER BY id
     `);
 
-    const map = {};
+    const values = await pool.query(`
+      SELECT lead_id, field_key, value
+      FROM leads_value
+    `);
 
-    rows.rows.forEach(r => {
-      if (!map[r.lead_id]) map[r.lead_id] = { id: r.lead_id };
-      if (r.field_key) map[r.lead_id][r.field_key] = r.value ?? '';
+    res.json({
+      leads: leads.rows,
+      values: values.rows
     });
-
-    res.json(Object.values(map));
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-/* ------------------ CREATE LEAD (FIXED) ------------------ */
-app.post('/api/leads', async (_req, res) => {
-  const client = await pool.connect();
+/* ------------------ ADD LEAD ------------------ */
+app.post('/api/leads', async (_, res) => {
   try {
-    await client.query('BEGIN');
+    const id = uuid();
 
-    const leadId = uuid();
-
-    await client.query(
-      `INSERT INTO public.leads (id) VALUES ($1)`,
-      [leadId]
+    await pool.query(
+      `INSERT INTO leads_value (lead_id, field_key, value, source, locked)
+       VALUES ($1,'full_name','', 'manual', false)
+       ON CONFLICT DO NOTHING`,
+      [id]
     );
 
-    const fields = await client.query(
-      `SELECT key FROM public.fields WHERE hidden = false`
+    await pool.query(
+      `INSERT INTO action_log (lead_id, action_type, details)
+       VALUES ($1,'create','Lead created')`,
+      [id]
     );
 
-    for (const f of fields.rows) {
-      await client.query(
-        `
-        INSERT INTO public.leads_value
-          (lead_id, field_key, value, source, locked)
-        VALUES ($1, $2, '', 'manual', false)
-        `,
-        [leadId, f.key]
-      );
-    }
-
-    await client.query(
-      `
-      INSERT INTO public.action_log (lead_id, action_type, details)
-      VALUES ($1, 'create', 'Lead created')
-      `,
-      [leadId]
-    );
-
-    await client.query('COMMIT');
-    res.json({ id: leadId });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  } finally {
-    client.release();
+    res.json({ id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 /* ------------------ UPDATE CELL ------------------ */
 app.post('/api/lead-value', async (req, res) => {
   const { lead_id, field_key, value } = req.body;
-  try {
-    await pool.query(
-      `
-      INSERT INTO public.leads_value
-        (lead_id, field_key, value, source, locked)
-      VALUES ($1,$2,$3,'manual',true)
-      ON CONFLICT (lead_id, field_key)
-      DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-      `,
-      [lead_id, field_key, value]
-    );
 
-    await pool.query(
-      `
-      INSERT INTO public.action_log (lead_id, action_type, details)
-      VALUES ($1,'update',$2)
-      `,
-      [lead_id, `${field_key} updated`]
-    );
+  await pool.query(`
+    INSERT INTO leads_value (lead_id, field_key, value, source, locked)
+    VALUES ($1,$2,$3,'manual',true)
+    ON CONFLICT (lead_id, field_key)
+    DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+  `, [lead_id, field_key, value]);
 
-    res.json({ success: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+  await pool.query(`
+    INSERT INTO action_log (lead_id, action_type, details)
+    VALUES ($1,'update',$2)
+  `, [lead_id, `${field_key} updated`]);
+
+  res.json({ success: true });
 });
 
-/* ------------------ FRONTEND ------------------ */
-app.get('*', (_req, res) => {
+/* ------------------ DELETE LEAD (LOGICAL) ------------------ */
+app.post('/api/leads/delete', async (req, res) => {
+  const { ids } = req.body;
+
+  await pool.query(
+    `DELETE FROM leads_value WHERE lead_id = ANY($1)`,
+    [ids]
+  );
+
+  for (const id of ids) {
+    await pool.query(
+      `INSERT INTO action_log (lead_id, action_type, details)
+       VALUES ($1,'delete','Lead deleted')`,
+      [id]
+    );
+  }
+
+  res.json({ success: true });
+});
+
+/* ------------------ UI ------------------ */
+app.get('*', (_, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-/* ------------------ START ------------------ */
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`✅ AltoCRM running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ AltoCRM running on ${PORT}`));
