@@ -28,30 +28,51 @@ app.get("/", (req, res) => {
 });
 
 /* ======================
-   GET LEADS
+   GET LEADS WITH FILTERS
    - excludes soft-deleted
-   - ready for filters later
+   - supports multi-filters
+   - supports blank values
+   - clear filters = no params
 ====================== */
 app.get("/api/leads", async (req, res) => {
   try {
-    const result = await pool.query(`
+    const filters = [];
+    const values = [];
+    let index = 1;
+
+    for (const [field, value] of Object.entries(req.query)) {
+      if (value === "__blank__") {
+        filters.push(`(${field} IS NULL OR ${field} = '')`);
+      } else {
+        filters.push(`${field} = $${index}`);
+        values.push(value);
+        index++;
+      }
+    }
+
+    const whereClause =
+      filters.length > 0
+        ? `AND ${filters.join(" AND ")}`
+        : "";
+
+    const query = `
       SELECT *
       FROM leads
       WHERE deleted = false
+      ${whereClause}
       ORDER BY created_at DESC
-    `);
+    `;
 
+    const result = await pool.query(query, values);
     res.json(result.rows);
   } catch (err) {
-    console.error("GET LEADS ERROR:", err.message);
+    console.error("FILTER ERROR:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 /* ======================
    CREATE LEAD (MINIMAL)
-   - email1 (not email)
-   - everything else can be enriched later
 ====================== */
 app.post("/api/leads", async (req, res) => {
   try {
@@ -85,8 +106,6 @@ app.post("/api/leads", async (req, res) => {
 
 /* ======================
    UPDATE LEAD (GENERIC)
-   - allows manual edits
-   - AI will use this endpoint too
 ====================== */
 app.patch("/api/leads/:id", async (req, res) => {
   try {
@@ -112,7 +131,6 @@ app.patch("/api/leads/:id", async (req, res) => {
     `;
 
     const result = await pool.query(query, [...values, id]);
-
     res.json(result.rows[0]);
   } catch (err) {
     console.error("UPDATE LEAD ERROR:", err.message);
@@ -142,7 +160,7 @@ app.delete("/api/leads/:id", async (req, res) => {
 });
 
 /* ======================
-   ACTION LOG (CALL / EMAIL / MEETING)
+   ACTION LOG
 ====================== */
 app.post("/api/leads/:id/actions", async (req, res) => {
   try {
