@@ -1,155 +1,558 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>AltoCRM</title>
+  <meta charset="UTF-8" />
+  <title>AltoCRM – Leads</title>
   <style>
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ccc; padding: 6px; }
-    th { background: #f0f0f0; }
-    button { margin: 3px; }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #f4f4f7;
+    }
+    h1 {
+      margin-top: 0;
+      margin-bottom: 8px;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    button {
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button.primary {
+      background: #2563eb;
+      color: #fff;
+      border-color: #1d4ed8;
+    }
+    button.danger {
+      background: #dc2626;
+      color: #fff;
+      border-color: #b91c1c;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      background: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1);
+      font-size: 13px;
+    }
+    th, td {
+      border-bottom: 1px solid #e5e7eb;
+      padding: 6px 8px;
+      text-align: left;
+    }
+    th {
+      background: #f9fafb;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    input[type="text"],
+    input[type="number"],
+    select,
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      font-size: 13px;
+      padding: 3px 4px;
+    }
+    textarea {
+      resize: vertical;
+      min-height: 40px;
+    }
+    .filter-row th {
+      background: #eef2ff;
+      border-bottom: 1px solid #c7d2fe;
+    }
+    .filter-select {
+      width: 100%;
+      font-size: 12px;
+    }
+    .actions-cell {
+      white-space: nowrap;
+    }
+    .checkbox-cell {
+      text-align: center;
+      width: 30px;
+    }
+    .undo-banner {
+      position: fixed;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #111827;
+      color: white;
+      padding: 8px 12px;
+      border-radius: 999px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+    }
+    .undo-banner button {
+      background: #fbbf24;
+      border-color: #f59e0b;
+      color: #111827;
+      font-weight: 600;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      font-size: 11px;
+      background: #e5e7eb;
+      color: #374151;
+    }
   </style>
 </head>
 <body>
+  <h1>AltoCRM – Leads</h1>
+  <div class="toolbar">
+    <button class="primary" id="addLeadBtn">+ Add Lead</button>
+    <button class="danger" id="bulkDeleteBtn" disabled>Delete Selected</button>
+    <span id="status" style="margin-left:auto;font-size:12px;color:#6b7280;"></span>
+  </div>
 
-<h2>AltoCRM</h2>
+  <table id="leadsTable">
+    <thead id="thead"></thead>
+    <tbody id="tbody"></tbody>
+  </table>
 
-<form id="leadForm">
-  <input id="full_name" placeholder="Full Name">
-  <input id="email" placeholder="Email">
-  <input id="company" placeholder="Company">
-  <button>Add</button>
-</form>
+  <div id="undoBanner" class="undo-banner" style="display:none;">
+    <span id="undoText">Lead deleted.</span>
+    <button id="undoBtn">Undo</button>
+  </div>
 
-<hr>
+  <script>
+    let fields = [];
+    let leads = [];
+    let filters = {}; // { fieldKey: valueOrBlankToken }
+    let selectedIds = new Set();
 
-<label>Company Filter:</label>
-<select id="companyFilter">
-  <option value="">All</option>
-  <option value="__BLANK__">(Blank)</option>
-</select>
+    // pending delete (single or batch)
+    let pendingDelete = null; 
+    const UNDO_TIMEOUT_MS = 5000;
+    const BLANK_TOKEN = "__BLANK__";
 
-<button id="bulkDelete">Delete Selected</button>
-<button id="undoBtn" style="display:none;">Undo Delete</button>
+    const thead = document.getElementById("thead");
+    const tbody = document.getElementById("tbody");
+    const statusEl = document.getElementById("status");
+    const addLeadBtn = document.getElementById("addLeadBtn");
+    const bulkDeleteBtn = document.getElementById("bulkDeleteBtn");
+    const undoBanner = document.getElementById("undoBanner");
+    const undoBtn = document.getElementById("undoBtn");
+    const undoText = document.getElementById("undoText");
 
-<table>
-  <thead>
-    <tr>
-      <th><input type="checkbox" id="selectAll"></th>
-      <th>Name</th><th>Email</th><th>Company</th><th>Action</th>
-    </tr>
-  </thead>
-  <tbody id="tbody"></tbody>
-</table>
+    // ----------------- DATA LOADING -----------------
 
-<script>
-let allLeads = [];
-let deletedIds = [];
-let undoTimer = null;
+    async function loadData() {
+      setStatus("Loading...");
+      try {
+        const res = await fetch("/api/leads");
+        const data = await res.json();
+        fields = data.fields || [];
+        leads = data.leads || [];
+        selectedIds = new Set();
+        filters = {};
+        render();
+        setStatus(`Loaded ${leads.length} leads`);
+      } catch (e) {
+        console.error(e);
+        setStatus("Failed to load data");
+      }
+    }
 
-/* ---------- LOAD ---------- */
-async function load() {
-  const res = await fetch("/api/leads");
-  allLeads = await res.json();
-  populateFilter();
-  render(allLeads);
-}
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
 
-function populateFilter() {
-  const sel = document.getElementById("companyFilter");
-  const values = [...new Set(allLeads.map(l => l.company).filter(v => v))];
-  sel.innerHTML = `<option value="">All</option><option value="__BLANK__">(Blank)</option>`;
-  values.forEach(v => sel.innerHTML += `<option>${v}</option>`);
-}
+    // ----------------- RENDERING --------------------
 
-/* ---------- RENDER ---------- */
-function render(data) {
-  const tbody = document.getElementById("tbody");
-  tbody.innerHTML = "";
-  data.forEach(l => {
-    tbody.innerHTML += `
-      <tr>
-        <td><input type="checkbox" class="rowCheck" value="${l.id}"></td>
-        <td>${l.full_name || ""}</td>
-        <td>${l.email || ""}</td>
-        <td>${l.company || ""}</td>
-        <td><button onclick="deleteRows([${l.id}])">Delete</button></td>
-      </tr>`;
-  });
-}
+    function render() {
+      renderHeader();
+      renderBody();
+      updateBulkDeleteButton();
+    }
 
-/* ---------- FILTER ---------- */
-document.getElementById("companyFilter").onchange = e => {
-  const v = e.target.value;
-  let filtered = [...allLeads];
+    function renderHeader() {
+      thead.innerHTML = "";
 
-  if (v === "__BLANK__") {
-    filtered = filtered.filter(l => !l.company || l.company.trim() === "");
-  } else if (v) {
-    filtered = filtered.filter(l => l.company === v);
-  }
+      // Filter row
+      const filterRow = document.createElement("tr");
+      filterRow.className = "filter-row";
 
-  render(filtered);
-};
+      // selection column
+      let thSelFilter = document.createElement("th");
+      thSelFilter.className = "checkbox-cell";
+      filterRow.appendChild(thSelFilter);
 
-/* ---------- ADD ---------- */
-document.getElementById("leadForm").onsubmit = async e => {
-  e.preventDefault();
-  await fetch("/api/leads", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      full_name: full_name.value,
-      email: email.value,
-      company: company.value
-    })
-  });
-  leadForm.reset();
-  load();
-};
+      // data columns
+      for (const f of fields) {
+        const th = document.createElement("th");
+        const select = document.createElement("select");
+        select.className = "filter-select";
 
-/* ---------- DELETE + UNDO ---------- */
-async function deleteRows(ids) {
-  deletedIds = ids;
+        const allOpt = document.createElement("option");
+        allOpt.value = "";
+        allOpt.textContent = "All";
+        select.appendChild(allOpt);
 
-  await fetch("/api/leads/delete", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ ids })
-  });
+        const blankOpt = document.createElement("option");
+        blankOpt.value = BLANK_TOKEN;
+        blankOpt.textContent = "(Blank)";
+        select.appendChild(blankOpt);
 
-  document.getElementById("undoBtn").style.display = "inline";
-  clearTimeout(undoTimer);
-  undoTimer = setTimeout(() => {
-    deletedIds = [];
-    document.getElementById("undoBtn").style.display = "none";
-    load();
-  }, 5000);
-}
+        // unique values from leads
+        const vals = new Set();
+        for (const lead of leads) {
+          const v = lead[f.key];
+          if (v !== null && v !== undefined && v !== "") {
+            vals.add(String(v));
+          }
+        }
+        const sorted = Array.from(vals).sort((a, b) => a.localeCompare(b));
+        for (const v of sorted) {
+          const opt = document.createElement("option");
+          opt.value = v;
+          opt.textContent = v;
+          select.appendChild(opt);
+        }
 
-/* ---------- RESTORE ---------- */
-document.getElementById("undoBtn").onclick = async () => {
-  await fetch("/api/leads/restore", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ ids: deletedIds })
-  });
-  deletedIds = [];
-  document.getElementById("undoBtn").style.display = "none";
-  load();
-};
+        select.value = filters[f.key] || "";
+        select.addEventListener("change", () => {
+          const val = select.value;
+          if (val === "") {
+            delete filters[f.key]; // clear filter
+          } else {
+            filters[f.key] = val;
+          }
+          renderBody();
+        });
 
-/* ---------- BULK ---------- */
-document.getElementById("bulkDelete").onclick = () => {
-  const ids = [...document.querySelectorAll(".rowCheck:checked")].map(c => +c.value);
-  if (ids.length) deleteRows(ids);
-};
+        th.appendChild(select);
+        filterRow.appendChild(th);
+      }
 
-document.getElementById("selectAll").onclick = e => {
-  document.querySelectorAll(".rowCheck").forEach(c => c.checked = e.target.checked);
-};
+      // actions filter column
+      const thActionsFilter = document.createElement("th");
+      thActionsFilter.textContent = "";
+      filterRow.appendChild(thActionsFilter);
 
-load();
-</script>
+      thead.appendChild(filterRow);
 
+      // Header row with labels
+      const headerRow = document.createElement("tr");
+
+      // select-all checkbox
+      const thSelect = document.createElement("th");
+      thSelect.className = "checkbox-cell";
+      const selectAll = document.createElement("input");
+      selectAll.type = "checkbox";
+      selectAll.addEventListener("change", () => {
+        selectedIds.clear();
+        if (selectAll.checked) {
+          for (const lead of applyFilters(leads)) {
+            selectedIds.add(lead.id);
+          }
+        }
+        renderBody();
+        updateBulkDeleteButton();
+      });
+      thSelect.appendChild(selectAll);
+      headerRow.appendChild(thSelect);
+
+      for (const f of fields) {
+        const th = document.createElement("th");
+        th.textContent = f.label;
+        headerRow.appendChild(th);
+      }
+
+      const thActions = document.createElement("th");
+      thActions.textContent = "Actions";
+      headerRow.appendChild(thActions);
+
+      thead.appendChild(headerRow);
+    }
+
+    function applyFilters(allLeads) {
+      return allLeads.filter(lead => {
+        for (const [key, val] of Object.entries(filters)) {
+          const fieldVal = lead[key] ?? "";
+          if (val === BLANK_TOKEN) {
+            if (fieldVal !== "" && fieldVal !== null && fieldVal !== undefined) {
+              return false;
+            }
+          } else {
+            if (String(fieldVal) !== String(val)) return false;
+          }
+        }
+        return true;
+      });
+    }
+
+    function renderBody() {
+      tbody.innerHTML = "";
+
+      const filteredLeads = applyFilters(leads);
+
+      for (const lead of filteredLeads) {
+        const tr = document.createElement("tr");
+
+        // selection checkbox
+        const tdSelect = document.createElement("td");
+        tdSelect.className = "checkbox-cell";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = selectedIds.has(lead.id);
+        cb.addEventListener("change", () => {
+          if (cb.checked) {
+            selectedIds.add(lead.id);
+          } else {
+            selectedIds.delete(lead.id);
+          }
+          updateBulkDeleteButton();
+        });
+        tdSelect.appendChild(cb);
+        tr.appendChild(tdSelect);
+
+        // data cells
+        for (const f of fields) {
+          const td = document.createElement("td");
+
+          const currentValue = lead[f.key] ?? "";
+
+          if (f.type === "select") {
+            const select = document.createElement("select");
+            select.value = currentValue;
+
+            // allow blank
+            const blankOpt = document.createElement("option");
+            blankOpt.value = "";
+            blankOpt.textContent = "";
+            select.appendChild(blankOpt);
+
+            const opts = parseSelectOptions(f.options);
+            for (const v of opts) {
+              const opt = document.createElement("option");
+              opt.value = v;
+              opt.textContent = v;
+              select.appendChild(opt);
+            }
+
+            select.value = currentValue;
+            select.addEventListener("change", async () => {
+              const newVal = select.value;
+              await saveCell(lead.id, f.key, newVal);
+              lead[f.key] = newVal;
+              setStatus("Saved");
+              renderHeader(); // refresh filters
+            });
+
+            td.appendChild(select);
+          } else if (f.type === "long_text") {
+            const ta = document.createElement("textarea");
+            ta.value = currentValue;
+            ta.addEventListener("blur", async () => {
+              const newVal = ta.value;
+              if (newVal === currentValue) return;
+              await saveCell(lead.id, f.key, newVal);
+              lead[f.key] = newVal;
+              setStatus("Saved");
+              renderHeader();
+            });
+            td.appendChild(ta);
+          } else {
+            const input = document.createElement("input");
+            input.type = f.type === "number" ? "number" : "text";
+            input.value = currentValue;
+            input.addEventListener("blur", async () => {
+              const newVal = input.value;
+              if (newVal === currentValue) return;
+              await saveCell(lead.id, f.key, newVal);
+              lead[f.key] = newVal;
+              setStatus("Saved");
+              renderHeader();
+            });
+            input.addEventListener("keydown", async (e) => {
+              if (e.key === "Enter") {
+                input.blur();
+              }
+            });
+            td.appendChild(input);
+          }
+
+          tr.appendChild(td);
+        }
+
+        // actions cell
+        const tdActions = document.createElement("td");
+        tdActions.className = "actions-cell";
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "danger";
+        delBtn.textContent = "Delete";
+        delBtn.addEventListener("click", () => {
+          scheduleDelete([lead.id], [lead]);
+        });
+
+        tdActions.appendChild(delBtn);
+        tr.appendChild(tdActions);
+
+        tbody.appendChild(tr);
+      }
+    }
+
+    function parseSelectOptions(optsRaw) {
+      if (!optsRaw) return [];
+      try {
+        const obj = typeof optsRaw === "string" ? JSON.parse(optsRaw) : optsRaw;
+        const values = Object.values(obj);
+        if (!values.length) return [];
+        const arr = values.find(v => Array.isArray(v));
+        return arr || [];
+      } catch (e) {
+        console.warn("Failed to parse select options:", optsRaw, e);
+        return [];
+      }
+    }
+
+    // ----------------- SAVE / DELETE / UNDO --------------------
+
+    async function saveCell(leadId, fieldKey, value) {
+      try {
+        await fetch(`/api/leads/${encodeURIComponent(leadId)}/fields/${encodeURIComponent(fieldKey)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value, source: "manual", locked: true }),
+        });
+      } catch (e) {
+        console.error("saveCell error", e);
+        setStatus("Failed to save");
+      }
+    }
+
+    // Schedule delete (with undo window)
+    function scheduleDelete(ids, leadSnapshots) {
+      // Remove from UI immediately
+      const idSet = new Set(ids);
+      leads = leads.filter(l => !idSet.has(l.id));
+      selectedIds = new Set([...selectedIds].filter(id => !idSet.has(id)));
+      render();
+
+      if (pendingDelete && pendingDelete.timeoutId) {
+        clearTimeout(pendingDelete.timeoutId);
+      }
+
+      pendingDelete = {
+        ids,
+        leadsBackup: leadSnapshots,
+        timeoutId: setTimeout(async () => {
+          try {
+            if (pendingDelete.ids.length === 1) {
+              await fetch(`/api/leads/${encodeURIComponent(pendingDelete.ids[0])}`, {
+                method: "DELETE",
+              });
+            } else {
+              await fetch(`/api/leads/bulk-delete`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ids: pendingDelete.ids }),
+              });
+            }
+          } catch (e) {
+            console.error("Delete error", e);
+          } finally {
+            pendingDelete = null;
+            hideUndo();
+            setStatus("Deleted");
+          }
+        }, UNDO_TIMEOUT_MS),
+      };
+
+      showUndo(ids.length);
+    }
+
+    function showUndo(count) {
+      undoText.textContent =
+        count === 1 ? "Lead deleted." : `${count} leads deleted.`;
+      undoBanner.style.display = "flex";
+    }
+
+    function hideUndo() {
+      undoBanner.style.display = "none";
+    }
+
+    undoBtn.addEventListener("click", () => {
+      if (!pendingDelete) return;
+      clearTimeout(pendingDelete.timeoutId);
+
+      // restore leads
+      for (const lead of pendingDelete.leadsBackup) {
+        leads.push({ ...lead });
+      }
+      // keep them selected state off
+      pendingDelete = null;
+      hideUndo();
+      render();
+      setStatus("Delete undone");
+    });
+
+    // ----------------- BULK DELETE & ADD LEAD ------------------
+
+    function updateBulkDeleteButton() {
+      bulkDeleteBtn.disabled = selectedIds.size === 0;
+    }
+
+    bulkDeleteBtn.addEventListener("click", () => {
+      const ids = Array.from(selectedIds);
+      if (ids.length === 0) return;
+      const snapshot = leads.filter(l => selectedIds.has(l.id));
+      scheduleDelete(ids, snapshot);
+    });
+
+    addLeadBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch("/api/leads", { method: "POST" });
+        const data = await res.json();
+        const id = data.id;
+
+        // add empty row to UI
+        const newLead = { id };
+        for (const f of fields) {
+          newLead[f.key] = "";
+        }
+        leads.push(newLead);
+        render();
+        setStatus("New lead created");
+      } catch (e) {
+        console.error("addLead error", e);
+        setStatus("Failed to create lead");
+      }
+    });
+
+    // ----------------- INIT ------------------------
+
+    loadData();
+  </script>
 </body>
 </html>
