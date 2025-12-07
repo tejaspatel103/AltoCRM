@@ -46,6 +46,27 @@ const PIPELINE_STAGES = [
 ];
 
 /* ======================
+   FIELD CATEGORY CONSTANTS
+   (for Step 2 rules)
+====================== */
+
+// Fields that are driven by integrations / auto systems (⚡)
+const INTEGRATION_FIELDS = [
+  "email_1_status",
+  "email_2_status",
+  "email_sequence",
+  "last_email_date",
+  "last_phone_date",
+  "call_count"
+];
+
+// Fields that are derived / computed and never manually edited
+const DERIVED_FIELDS = [
+  "local_time",
+  "timezone"
+];
+
+/* ======================
    AI HELPERS (STUB)
 ====================== */
 function aiSuggestLead(lead) {
@@ -89,46 +110,7 @@ async function auditChange({
 }
 
 /* ======================
-   FIELD SOURCE META HELPERS ✅ NEW
-====================== */
-async function getFieldMeta(lead_id, field_name) {
-  const { rows } = await pool.query(
-    `
-    SELECT *
-    FROM lead_field_meta
-    WHERE lead_id = $1 AND field_name = $2
-    `,
-    [lead_id, field_name]
-  );
-  return rows[0] || null;
-}
-
-async function upsertFieldMeta({
-  lead_id,
-  field_name,
-  source,
-  locked = false,
-  last_updated_by = null
-}) {
-  await pool.query(
-    `
-    INSERT INTO lead_field_meta
-      (lead_id, field_name, source, locked, last_updated_by)
-    VALUES
-      ($1, $2, $3, $4, $5)
-    ON CONFLICT (lead_id, field_name)
-    DO UPDATE SET
-      source = EXCLUDED.source,
-      locked = EXCLUDED.locked,
-      last_updated_at = now(),
-      last_updated_by = EXCLUDED.last_updated_by
-    `,
-    [lead_id, field_name, source, locked, last_updated_by]
-  );
-}
-
-/* ======================
-   AI FIELD LOCK HELPERS (UNCHANGED)
+   AI FIELD LOCK HELPERS
 ====================== */
 async function isFieldLocked(lead_id, field_name) {
   const { rows } = await pool.query(
@@ -165,6 +147,45 @@ async function upsertFieldLock({
       updated_at = now()
     `,
     [lead_id, field_name, ai_value, confidence, locked]
+  );
+}
+
+/* ======================
+   FIELD META HELPERS
+   (source: manual | ai | integration)
+====================== */
+async function getFieldMeta(lead_id, field_name) {
+  const { rows } = await pool.query(
+    `
+    SELECT source, locked, last_updated_by
+    FROM lead_field_meta
+    WHERE lead_id = $1 AND field_name = $2
+    `,
+    [lead_id, field_name]
+  );
+  return rows[0] || null;
+}
+
+async function upsertFieldMeta({
+  lead_id,
+  field_name,
+  source,
+  locked = false,
+  last_updated_by = null
+}) {
+  await pool.query(
+    `
+    INSERT INTO lead_field_meta
+      (lead_id, field_name, source, locked, last_updated_by)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (lead_id, field_name)
+    DO UPDATE SET
+      source = EXCLUDED.source,
+      locked = EXCLUDED.locked,
+      last_updated_by = EXCLUDED.last_updated_by,
+      updated_at = now()
+    `,
+    [lead_id, field_name, source, locked, last_updated_by]
   );
 }
 
@@ -257,7 +278,7 @@ async function handleJob(job) {
 }
 
 /* ======================
-   AI ENRICH JOB ✅ UPDATED
+   AI ENRICH JOB
 ====================== */
 async function processAIEnrichJob({ lead_id }) {
   const { rows } = await pool.query(
@@ -267,8 +288,7 @@ async function processAIEnrichJob({ lead_id }) {
 
   if (!rows.length) return;
 
-  const lead = rows[0];
-  const ai = aiSuggestLead(lead);
+  const ai = aiSuggestLead(rows[0]);
 
   for (const field of Object.keys(ai.suggestions)) {
     await upsertFieldLock({
@@ -278,12 +298,13 @@ async function processAIEnrichJob({ lead_id }) {
       confidence: ai.confidence[field]
     });
 
+    // Optionally mark meta as AI-sourced suggestion (does not overwrite lead value)
     await upsertFieldMeta({
       lead_id,
       field_name: field,
       source: "ai",
       locked: true,
-      last_updated_by: "ai"
+      last_updated_by: "ai_enrich_job"
     });
   }
 }
@@ -303,6 +324,38 @@ async function processImportRowJob({ data }) {
     `,
     values
   );
+
+  // Mark imported fields as manual by default
+  // (We don't know actor, so store "import" as last_updated_by)
+  // This is optional; you can expand to per-field if needed.
+}
+
+/* ======================
+   INTEGRATION FIELD WRITER
+   (used by future webhooks)
+====================== */
+async function writeIntegrationField({
+  lead_id,
+  field_name,
+  value,
+  source_system
+}) {
+  if (!INTEGRATION_FIELDS.includes(field_name)) {
+    throw new Error(`Field ${field_name} is not registered as integration-driven`);
+  }
+
+  await pool.query(
+    `UPDATE leads SET ${field_name} = $1 WHERE id = $2`,
+    [value, lead_id]
+  );
+
+  await upsertFieldMeta({
+    lead_id,
+    field_name,
+    source: "integration",
+    locked: false,
+    last_updated_by: source_system
+  });
 }
 
 /* ======================
@@ -311,7 +364,7 @@ async function processImportRowJob({ data }) {
 app.get("/", (_, res) => res.send("✅ AltoCRM API running"));
 
 /* ======================
-   UPDATE LEAD (META + LOCK AWARE) ✅ UPDATED
+   UPDATE LEAD (LOCK-AWARE + SOURCE-AWARE)
 ====================== */
 app.patch("/api/leads/:id", async (req, res) => {
   const client = await pool.connect();
@@ -333,18 +386,38 @@ app.patch("/api/leads/:id", async (req, res) => {
 
     const oldLead = rows[0];
 
-    for (const [field, newValue] of Object.entries(updates)) {
+    for (const [field, newValueRaw] of Object.entries(updates)) {
+      const newValue = newValueRaw === undefined ? null : newValueRaw;
       const oldValue = oldLead[field];
+
+      // No change → skip
       if (String(oldValue) === String(newValue)) continue;
 
-      const meta = await getFieldMeta(leadId, field);
-      if (meta?.locked) continue;
+      // Derived fields are never manually edited
+      if (DERIVED_FIELDS.includes(field)) {
+        continue;
+      }
 
+      // Integration fields: only editable if we *already* know this field is not integration-owned
+      if (INTEGRATION_FIELDS.includes(field)) {
+        const meta = await getFieldMeta(leadId, field);
+        if (!meta || meta.source === "integration") {
+          // Integration owns this field → ignore manual update
+          continue;
+        }
+      }
+
+      // AI lock: AI owns field until human explicitly unlocks
+      const locked = await isFieldLocked(leadId, field);
+      if (locked) continue;
+
+      // Perform update
       await client.query(
         `UPDATE leads SET ${field} = $1 WHERE id = $2`,
         [newValue, leadId]
       );
 
+      // Audit log
       await auditChange({
         lead_id: leadId,
         field_name: field,
@@ -353,6 +426,7 @@ app.patch("/api/leads/:id", async (req, res) => {
         actor_type: "human"
       });
 
+      // Update field meta: mark as manual
       await upsertFieldMeta({
         lead_id: leadId,
         field_name: field,
@@ -381,7 +455,7 @@ app.post("/api/leads/:id/ai/enqueue", async (req, res) => {
 });
 
 /* ======================
-   LOCK ENDPOINTS (UNCHANGED)
+   LOCK ENDPOINTS
 ====================== */
 app.post("/api/leads/:id/unlock", async (req, res) => {
   const { field_name } = req.body;
@@ -395,15 +469,28 @@ app.post("/api/leads/:id/unlock", async (req, res) => {
     [req.params.id, field_name]
   );
 
+  // Also update meta to manual (unlocked)
   await upsertFieldMeta({
     lead_id: req.params.id,
     field_name,
     source: "manual",
     locked: false,
-    last_updated_by: "human"
+    last_updated_by: "human_unlock"
   });
 
   res.json({ unlocked: field_name });
+});
+
+app.get("/api/leads/:id/locks", async (req, res) => {
+  const { rows } = await pool.query(
+    `
+    SELECT field_name, locked, locked_by, ai_value, confidence
+    FROM lead_field_locks
+    WHERE lead_id = $1
+    `,
+    [req.params.id]
+  );
+  res.json(rows);
 });
 
 /* ======================
@@ -425,6 +512,8 @@ app.get("/api/leads/:id/history", async (req, res) => {
 app.post("/api/leads/:id/undo", async (req, res) => {
   const client = await pool.connect();
   try {
+    const leadId = req.params.id;
+
     await client.query("BEGIN");
 
     const { rows } = await client.query(
@@ -435,7 +524,7 @@ app.post("/api/leads/:id/undo", async (req, res) => {
       ORDER BY created_at DESC
       LIMIT 1
       `,
-      [req.params.id]
+      [leadId]
     );
 
     if (!rows.length) {
@@ -447,8 +536,23 @@ app.post("/api/leads/:id/undo", async (req, res) => {
 
     await client.query(
       `UPDATE leads SET ${last.field_name} = $1 WHERE id = $2`,
-      [last.old_value, req.params.id]
+      [last.old_value, leadId]
     );
+
+    // Update meta: if this is an integration field, mark as integration source;
+    // otherwise mark as manual (we don't track older meta history yet).
+    let source = "manual";
+    if (INTEGRATION_FIELDS.includes(last.field_name)) {
+      source = "integration";
+    }
+
+    await upsertFieldMeta({
+      lead_id: leadId,
+      field_name: last.field_name,
+      source,
+      locked: false,
+      last_updated_by: "undo"
+    });
 
     await client.query(
       "DELETE FROM lead_audit_logs WHERE id = $1",
