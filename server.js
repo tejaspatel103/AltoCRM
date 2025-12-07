@@ -67,7 +67,7 @@ function aiSuggestLead(lead) {
 }
 
 /* ======================
-   ✅ AUDIT HELPER
+   AUDIT HELPER
 ====================== */
 async function auditChange({
   lead_id,
@@ -80,15 +80,16 @@ async function auditChange({
   await pool.query(
     `
     INSERT INTO lead_audit_logs
-    (lead_id, action_type, field_name, old_value, new_value, actor_type, actor_id)
-    VALUES ($1, 'update', $2, $3, $4, $5, $6)
+      (lead_id, action_type, field_name, old_value, new_value, actor_type, actor_id)
+    VALUES
+      ($1, 'update', $2, $3, $4, $5, $6)
     `,
     [lead_id, field_name, old_value, new_value, actor_type, actor_id]
   );
 }
 
 /* ======================
-   ✅ AI FIELD LOCK HELPERS
+   AI FIELD LOCK HELPERS
 ====================== */
 async function isFieldLocked(lead_id, field_name) {
   const { rows } = await pool.query(
@@ -129,12 +130,143 @@ async function upsertFieldLock({
 }
 
 /* ======================
+   ✅ BACKGROUND QUEUE HELPERS
+====================== */
+async function enqueueJob(job_type, payload) {
+  await pool.query(
+    `
+    INSERT INTO background_jobs (job_type, payload, status)
+    VALUES ($1, $2, 'pending')
+    `,
+    [job_type, payload]
+  );
+}
+
+async function processNextJob() {
+  const client = await pool.connect();
+  let job;
+
+  try {
+    await client.query("BEGIN");
+
+    const { rows } = await client.query(
+      `
+      SELECT *
+      FROM background_jobs
+      WHERE status = 'pending'
+      ORDER BY created_at
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+      `
+    );
+
+    if (!rows.length) {
+      await client.query("ROLLBACK");
+      return;
+    }
+
+    job = rows[0];
+
+    await client.query(
+      `
+      UPDATE background_jobs
+      SET status = 'processing', attempts = attempts + 1
+      WHERE id = $1
+      `,
+      [job.id]
+    );
+
+    await client.query("COMMIT");
+
+    await handleJob(job);
+
+    await pool.query(
+      `
+      UPDATE background_jobs
+      SET status = 'done', completed_at = now()
+      WHERE id = $1
+      `,
+      [job.id]
+    );
+  } catch (err) {
+    if (job) {
+      await pool.query(
+        `
+        UPDATE background_jobs
+        SET status = 'failed', last_error = $1
+        WHERE id = $2
+        `,
+        [err.message, job.id]
+      );
+    }
+  } finally {
+    client.release();
+  }
+}
+
+/* ======================
+   JOB HANDLER
+====================== */
+async function handleJob(job) {
+  const payload = job.payload;
+
+  if (job.job_type === "ai_enrich") {
+    await processAIEnrichJob(payload);
+  }
+
+  if (job.job_type === "import_row") {
+    await processImportRowJob(payload);
+  }
+}
+
+/* ======================
+   AI ENRICH JOB
+====================== */
+async function processAIEnrichJob({ lead_id }) {
+  const { rows } = await pool.query(
+    `SELECT * FROM leads WHERE id = $1`,
+    [lead_id]
+  );
+
+  if (!rows.length) return;
+
+  const lead = rows[0];
+  const ai = aiSuggestLead(lead);
+
+  for (const field of Object.keys(ai.suggestions)) {
+    await upsertFieldLock({
+      lead_id,
+      field_name: field,
+      ai_value: ai.suggestions[field],
+      confidence: ai.confidence[field]
+    });
+  }
+}
+
+/* ======================
+   IMPORT ROW JOB
+====================== */
+async function processImportRowJob({ data }) {
+  const fields = Object.keys(data);
+  const values = Object.values(data);
+  const placeholders = fields.map((_, i) => `$${i + 1}`).join(",");
+
+  await pool.query(
+    `
+    INSERT INTO leads (${fields.join(", ")}, pipeline)
+    VALUES (${placeholders}, 'New')
+    `,
+    values
+  );
+}
+
+/* ======================
    HEALTH CHECK
 ====================== */
 app.get("/", (_, res) => res.send("✅ AltoCRM API running"));
 
 /* ======================
-   ✅ UPDATE LEAD (RESPECT AI LOCKS)
+   UPDATE LEAD (RESPECT AI LOCKS)
 ====================== */
 app.patch("/api/leads/:id", async (req, res) => {
   const client = await pool.connect();
@@ -158,13 +290,10 @@ app.patch("/api/leads/:id", async (req, res) => {
 
     for (const [field, newValue] of Object.entries(updates)) {
       const oldValue = oldLead[field];
-
       if (String(oldValue) === String(newValue)) continue;
 
       const locked = await isFieldLocked(leadId, field);
-      if (locked) {
-        continue; // ✅ AI lock respected
-      }
+      if (locked) continue;
 
       await client.query(
         `UPDATE leads SET ${field} = $1 WHERE id = $2`,
@@ -191,65 +320,11 @@ app.patch("/api/leads/:id", async (req, res) => {
 });
 
 /* ======================
-   ✅ AI SUGGEST + LOCK FIELDS
+   AI ENQUEUE (BACKGROUND)
 ====================== */
-app.post("/api/leads/:id/ai/lock", async (req, res) => {
-  const leadId = req.params.id;
-
-  const { rows } = await pool.query(
-    `SELECT * FROM leads WHERE id = $1`,
-    [leadId]
-  );
-
-  if (!rows.length) {
-    return res.status(404).json({ error: "Lead not found" });
-  }
-
-  const ai = aiSuggestLead(rows[0]);
-
-  for (const field of Object.keys(ai.suggestions)) {
-    await upsertFieldLock({
-      lead_id: leadId,
-      field_name: field,
-      ai_value: ai.suggestions[field],
-      confidence: ai.confidence[field]
-    });
-  }
-
-  res.json({ locked_fields: ai.suggestions });
-});
-
-/* ======================
-   ✅ GET FIELD LOCK STATUS
-====================== */
-app.get("/api/leads/:id/locks", async (req, res) => {
-  const { rows } = await pool.query(
-    `
-    SELECT field_name, locked, locked_by, ai_value, confidence
-    FROM lead_field_locks
-    WHERE lead_id = $1
-    `,
-    [req.params.id]
-  );
-  res.json(rows);
-});
-
-/* ======================
-   ✅ HUMAN OVERRIDE / UNLOCK FIELD
-====================== */
-app.post("/api/leads/:id/unlock", async (req, res) => {
-  const { field_name } = req.body;
-
-  await pool.query(
-    `
-    UPDATE lead_field_locks
-    SET locked = false, locked_by = 'human', updated_at = now()
-    WHERE lead_id = $1 AND field_name = $2
-    `,
-    [req.params.id, field_name]
-  );
-
-  res.json({ unlocked: field_name });
+app.post("/api/leads/:id/ai/enqueue", async (req, res) => {
+  await enqueueJob("ai_enrich", { lead_id: req.params.id });
+  res.json({ queued: true });
 });
 
 /* ======================
@@ -257,62 +332,20 @@ app.post("/api/leads/:id/unlock", async (req, res) => {
 ====================== */
 app.get("/api/leads/:id/history", async (req, res) => {
   const { rows } = await pool.query(
-    `
-    SELECT *
-    FROM lead_audit_logs
-    WHERE lead_id = $1
-    ORDER BY created_at DESC
-    `,
+    `SELECT * FROM lead_audit_logs WHERE lead_id = $1 ORDER BY created_at DESC`,
     [req.params.id]
   );
   res.json(rows);
 });
 
 /* ======================
-   UNDO LAST CHANGE
+   QUEUE WORKER LOOP
 ====================== */
-app.post("/api/leads/:id/undo", async (req, res) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const { rows } = await client.query(
-      `
-      SELECT *
-      FROM lead_audit_logs
-      WHERE lead_id = $1
-      ORDER BY created_at DESC
-      LIMIT 1
-      `,
-      [req.params.id]
-    );
-
-    if (!rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ error: "Nothing to undo" });
-    }
-
-    const last = rows[0];
-
-    await client.query(
-      `UPDATE leads SET ${last.field_name} = $1 WHERE id = $2`,
-      [last.old_value, req.params.id]
-    );
-
-    await client.query(
-      "DELETE FROM lead_audit_logs WHERE id = $1",
-      [last.id]
-    );
-
-    await client.query("COMMIT");
-    res.json({ undone: true });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    res.status(500).json({ error: err.message });
-  } finally {
-    client.release();
-  }
-});
+setInterval(() => {
+  processNextJob().catch(err =>
+    console.error("Queue error:", err.message)
+  );
+}, 2000);
 
 /* ======================
    START SERVER
