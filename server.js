@@ -4,6 +4,7 @@ import pkg from "pg";
 import multer from "multer";
 import fs from "fs";
 import csv from "csv-parser";
+import { Parser } from "json2csv";
 
 const { Pool } = pkg;
 const app = express();
@@ -96,7 +97,7 @@ function aiScoreLead(lead) {
 app.get("/", (_, res) => res.send("✅ AltoCRM API running"));
 
 /* =====================================================
-   IMPORT – STEP 1: PREVIEW CSV (HEADERS + SAMPLE ROWS)
+   IMPORT – STEP 1: PREVIEW CSV
 ===================================================== */
 app.post("/api/import/preview", upload.single("file"), async (req, res) => {
   try {
@@ -160,22 +161,53 @@ app.post("/api/import/commit", async (req, res) => {
 /* ======================
    GET LEADS WITH FILTERS
 ====================== */
-app.get("/api/leads", async (req, res) => {
-  try {
-    const filters = [];
-    const values = [];
-    let i = 1;
+function buildFilterQuery(queryParams) {
+  const filters = [];
+  const values = [];
+  let i = 1;
 
-    for (const [field, value] of Object.entries(req.query)) {
-      if (value === "__blank__") {
-        filters.push(`(${field} IS NULL OR ${field} = '')`);
-      } else {
-        filters.push(`${field} = $${i++}`);
-        values.push(value);
-      }
+  for (const [field, value] of Object.entries(queryParams)) {
+    if (value === "__blank__") {
+      filters.push(`(${field} IS NULL OR ${field} = '')`);
+    } else {
+      filters.push(`${field} = $${i++}`);
+      values.push(value);
     }
+  }
 
-    const where = filters.length ? `AND ${filters.join(" AND ")}` : "";
+  return {
+    where: filters.length ? `AND ${filters.join(" AND ")}` : "",
+    values
+  };
+}
+
+app.get("/api/leads", async (req, res) => {
+  const { where, values } = buildFilterQuery(req.query);
+  const { rows } = await pool.query(
+    `
+    SELECT *
+    FROM leads
+    WHERE deleted = false
+    ${where}
+    ORDER BY created_at DESC
+    `,
+    values
+  );
+  res.json(rows);
+});
+
+/* ======================
+   EXPORT LEADS (CSV)
+====================== */
+app.get("/api/leads/export", async (req, res) => {
+  try {
+    const { fields } = req.query;
+    const exportFields = fields ? fields.split(",") : null;
+
+    const filterParams = { ...req.query };
+    delete filterParams.fields;
+
+    const { where, values } = buildFilterQuery(filterParams);
 
     const { rows } = await pool.query(
       `
@@ -188,17 +220,34 @@ app.get("/api/leads", async (req, res) => {
       values
     );
 
-    res.json(rows);
+    if (!rows.length) {
+      return res.status(400).json({ error: "No data to export" });
+    }
+
+    const parser = new Parser({
+      fields: exportFields || Object.keys(rows[0])
+    });
+
+    const csvData = parser.parse(rows);
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="leads_export_${Date.now()}.csv"`
+    );
+
+    res.send(csvData);
   } catch (err) {
+    console.error("EXPORT ERROR:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 /* ======================
-   CREATE / UPDATE / PIPELINE / BULK / AI / DASHBOARD
-   (UNCHANGED — YOUR CURRENT LOGIC)
+   REST OF YOUR LOGIC
+   (CREATE / UPDATE / BULK / AI / DASHBOARD)
+   — UNCHANGED —
 ====================== */
-/* --- everything from your previous version remains exactly as-is --- */
 
 /* ======================
    START SERVER
