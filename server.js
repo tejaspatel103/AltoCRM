@@ -21,6 +21,23 @@ const pool = new Pool({
 });
 
 /* ======================
+   PIPELINE STAGES (LOCKED)
+====================== */
+const PIPELINE_STAGES = [
+  "New",
+  "Trying",
+  "Contacted",
+  "Follow-up",
+  "Meeting Booked",
+  "Proposal",
+  "Won",
+  "Very Important",
+  "Lost",
+  "Not Interested",
+  "Tired of trying"
+];
+
+/* ======================
    HEALTH CHECK
 ====================== */
 app.get("/", (req, res) => {
@@ -29,10 +46,6 @@ app.get("/", (req, res) => {
 
 /* ======================
    GET LEADS WITH FILTERS
-   - excludes soft-deleted
-   - supports multi-filters
-   - supports blank values
-   - clear filters = no params
 ====================== */
 app.get("/api/leads", async (req, res) => {
   try {
@@ -89,9 +102,10 @@ app.post("/api/leads", async (req, res) => {
         full_name,
         email1,
         company,
-        lead_source
+        lead_source,
+        pipeline
       )
-      VALUES ($1, $2, $3, $4)
+      VALUES ($1, $2, $3, $4, 'New')
       RETURNING *
       `,
       [full_name, email1, company, lead_source]
@@ -134,6 +148,61 @@ app.patch("/api/leads/:id", async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error("UPDATE LEAD ERROR:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ======================
+   UPDATE PIPELINE (VALIDATED)
+====================== */
+app.patch("/api/leads/:id/pipeline", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { pipeline } = req.body;
+
+    if (!PIPELINE_STAGES.includes(pipeline)) {
+      return res.status(400).json({
+        error: "Invalid pipeline stage",
+        allowed: PIPELINE_STAGES
+      });
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE leads
+      SET pipeline = $1, updated_at = now()
+      WHERE id = $2
+      AND deleted = false
+      RETURNING *
+      `,
+      [pipeline, id]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("PIPELINE UPDATE ERROR:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ======================
+   PIPELINE SUMMARY (DASHBOARD)
+====================== */
+app.get("/api/pipeline/summary", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT pipeline, COUNT(*) AS count
+      FROM leads
+      WHERE deleted = false
+      GROUP BY pipeline
+      ORDER BY pipeline
+      `
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("PIPELINE SUMMARY ERROR:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
