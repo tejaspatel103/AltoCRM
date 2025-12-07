@@ -29,7 +29,7 @@ const pool = new Pool({
 const upload = multer({ dest: "uploads/" });
 
 /* ======================
-   PIPELINE STAGES (LOCKED)
+   PIPELINE STAGES
 ====================== */
 const PIPELINE_STAGES = [
   "New",
@@ -46,7 +46,7 @@ const PIPELINE_STAGES = [
 ];
 
 /* ======================
-   AI HELPERS (STUB – SAFE)
+   AI HELPERS (STUB)
 ====================== */
 function aiSuggestLead(lead) {
   const first = lead.full_name?.split(" ")[0] || null;
@@ -88,12 +88,53 @@ async function auditChange({
 }
 
 /* ======================
+   ✅ AI FIELD LOCK HELPERS
+====================== */
+async function isFieldLocked(lead_id, field_name) {
+  const { rows } = await pool.query(
+    `
+    SELECT locked, locked_by
+    FROM lead_field_locks
+    WHERE lead_id = $1 AND field_name = $2
+    `,
+    [lead_id, field_name]
+  );
+
+  if (!rows.length) return false;
+  return rows[0].locked && rows[0].locked_by === "ai";
+}
+
+async function upsertFieldLock({
+  lead_id,
+  field_name,
+  ai_value,
+  confidence,
+  locked = true
+}) {
+  await pool.query(
+    `
+    INSERT INTO lead_field_locks
+      (lead_id, field_name, ai_value, confidence, locked, locked_by)
+    VALUES ($1, $2, $3, $4, $5, 'ai')
+    ON CONFLICT (lead_id, field_name)
+    DO UPDATE SET
+      ai_value = EXCLUDED.ai_value,
+      confidence = EXCLUDED.confidence,
+      locked = EXCLUDED.locked,
+      locked_by = 'ai',
+      updated_at = now()
+    `,
+    [lead_id, field_name, ai_value, confidence, locked]
+  );
+}
+
+/* ======================
    HEALTH CHECK
 ====================== */
 app.get("/", (_, res) => res.send("✅ AltoCRM API running"));
 
 /* ======================
-   UPDATE LEAD + AUDIT
+   ✅ UPDATE LEAD (RESPECT AI LOCKS)
 ====================== */
 app.patch("/api/leads/:id", async (req, res) => {
   const client = await pool.connect();
@@ -118,19 +159,25 @@ app.patch("/api/leads/:id", async (req, res) => {
     for (const [field, newValue] of Object.entries(updates)) {
       const oldValue = oldLead[field];
 
-      if (String(oldValue) !== String(newValue)) {
-        await client.query(
-          `UPDATE leads SET ${field} = $1 WHERE id = $2`,
-          [newValue, leadId]
-        );
+      if (String(oldValue) === String(newValue)) continue;
 
-        await auditChange({
-          lead_id: leadId,
-          field_name: field,
-          old_value: oldValue,
-          new_value: newValue
-        });
+      const locked = await isFieldLocked(leadId, field);
+      if (locked) {
+        continue; // ✅ AI lock respected
       }
+
+      await client.query(
+        `UPDATE leads SET ${field} = $1 WHERE id = $2`,
+        [newValue, leadId]
+      );
+
+      await auditChange({
+        lead_id: leadId,
+        field_name: field,
+        old_value: oldValue,
+        new_value: newValue,
+        actor_type: "human"
+      });
     }
 
     await client.query("COMMIT");
@@ -141,6 +188,68 @@ app.patch("/api/leads/:id", async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+/* ======================
+   ✅ AI SUGGEST + LOCK FIELDS
+====================== */
+app.post("/api/leads/:id/ai/lock", async (req, res) => {
+  const leadId = req.params.id;
+
+  const { rows } = await pool.query(
+    `SELECT * FROM leads WHERE id = $1`,
+    [leadId]
+  );
+
+  if (!rows.length) {
+    return res.status(404).json({ error: "Lead not found" });
+  }
+
+  const ai = aiSuggestLead(rows[0]);
+
+  for (const field of Object.keys(ai.suggestions)) {
+    await upsertFieldLock({
+      lead_id: leadId,
+      field_name: field,
+      ai_value: ai.suggestions[field],
+      confidence: ai.confidence[field]
+    });
+  }
+
+  res.json({ locked_fields: ai.suggestions });
+});
+
+/* ======================
+   ✅ GET FIELD LOCK STATUS
+====================== */
+app.get("/api/leads/:id/locks", async (req, res) => {
+  const { rows } = await pool.query(
+    `
+    SELECT field_name, locked, locked_by, ai_value, confidence
+    FROM lead_field_locks
+    WHERE lead_id = $1
+    `,
+    [req.params.id]
+  );
+  res.json(rows);
+});
+
+/* ======================
+   ✅ HUMAN OVERRIDE / UNLOCK FIELD
+====================== */
+app.post("/api/leads/:id/unlock", async (req, res) => {
+  const { field_name } = req.body;
+
+  await pool.query(
+    `
+    UPDATE lead_field_locks
+    SET locked = false, locked_by = 'human', updated_at = now()
+    WHERE lead_id = $1 AND field_name = $2
+    `,
+    [req.params.id, field_name]
+  );
+
+  res.json({ unlocked: field_name });
 });
 
 /* ======================
