@@ -56,39 +56,35 @@ function aiSuggestLead(lead) {
     suggestions: {
       first_name: first,
       last_name: last,
-      company_short: lead.company ? lead.company.split(" ")[0] : null,
-      linkedin_url: null,
-      website: null,
-      city: null,
-      state: null
+      company_short: lead.company ? lead.company.split(" ")[0] : null
     },
     confidence: {
       first_name: 0.9,
       last_name: 0.9,
-      company_short: 0.7,
-      linkedin_url: 0.4
+      company_short: 0.7
     }
   };
 }
 
-function aiScoreLead(lead) {
-  let score = 10;
-  const reasons = [];
-
-  if (!lead.email1) {
-    score -= 2;
-    reasons.push("Missing email");
-  }
-  if (!lead.company) {
-    score -= 2;
-    reasons.push("Missing company");
-  }
-  if (!lead.linkedin_url) {
-    score -= 2;
-    reasons.push("Missing LinkedIn");
-  }
-
-  return { score: Math.max(score, 1), reasons };
+/* ======================
+   ✅ AUDIT HELPER
+====================== */
+async function auditChange({
+  lead_id,
+  field_name,
+  old_value,
+  new_value,
+  actor_type = "user",
+  actor_id = null
+}) {
+  await pool.query(
+    `
+    INSERT INTO lead_audit_logs
+    (lead_id, action_type, field_name, old_value, new_value, actor_type, actor_id)
+    VALUES ($1, 'update', $2, $3, $4, $5, $6)
+    `,
+    [lead_id, field_name, old_value, new_value, actor_type, actor_id]
+  );
 }
 
 /* ======================
@@ -96,162 +92,123 @@ function aiScoreLead(lead) {
 ====================== */
 app.get("/", (_, res) => res.send("✅ AltoCRM API running"));
 
-/* =====================================================
-   IMPORT – STEP 1: PREVIEW CSV
-===================================================== */
-app.post("/api/import/preview", upload.single("file"), async (req, res) => {
+/* ======================
+   UPDATE LEAD + AUDIT
+====================== */
+app.patch("/api/leads/:id", async (req, res) => {
+  const client = await pool.connect();
   try {
-    const headers = [];
-    const rows = [];
+    const leadId = req.params.id;
+    const updates = req.body;
 
-    fs.createReadStream(req.file.path)
-      .pipe(csv())
-      .on("headers", h => headers.push(...h))
-      .on("data", row => {
-        if (rows.length < 10) rows.push(row);
-      })
-      .on("end", () => {
-        fs.unlinkSync(req.file.path);
-        res.json({ headers, preview: rows });
-      });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+    await client.query("BEGIN");
 
-/* =====================================================
-   IMPORT – STEP 2: COMMIT IMPORT
-===================================================== */
-app.post("/api/import/commit", async (req, res) => {
-  try {
-    const { mapping, rows } = req.body;
-    if (!mapping || !rows?.length) {
-      return res.status(400).json({ error: "Invalid import payload" });
+    const { rows } = await client.query(
+      "SELECT * FROM leads WHERE id = $1 FOR UPDATE",
+      [leadId]
+    );
+
+    if (!rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Lead not found" });
     }
 
-    let inserted = 0;
+    const oldLead = rows[0];
 
-    for (const row of rows) {
-      const data = {};
-      for (const [csvCol, crmField] of Object.entries(mapping)) {
-        data[crmField] = row[csvCol] || null;
+    for (const [field, newValue] of Object.entries(updates)) {
+      const oldValue = oldLead[field];
+
+      if (String(oldValue) !== String(newValue)) {
+        await client.query(
+          `UPDATE leads SET ${field} = $1 WHERE id = $2`,
+          [newValue, leadId]
+        );
+
+        await auditChange({
+          lead_id: leadId,
+          field_name: field,
+          old_value: oldValue,
+          new_value: newValue
+        });
       }
-
-      const fields = Object.keys(data);
-      const values = Object.values(data);
-      const placeholders = fields.map((_, i) => `$${i + 1}`).join(", ");
-
-      await pool.query(
-        `
-        INSERT INTO leads (${fields.join(", ")}, pipeline)
-        VALUES (${placeholders}, 'New')
-        `,
-        values
-      );
-
-      inserted++;
     }
 
-    res.json({ inserted });
+    await client.query("COMMIT");
+    res.json({ success: true });
   } catch (err) {
+    await client.query("ROLLBACK");
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
 /* ======================
-   GET LEADS WITH FILTERS
+   VIEW AUDIT HISTORY
 ====================== */
-function buildFilterQuery(queryParams) {
-  const filters = [];
-  const values = [];
-  let i = 1;
-
-  for (const [field, value] of Object.entries(queryParams)) {
-    if (value === "__blank__") {
-      filters.push(`(${field} IS NULL OR ${field} = '')`);
-    } else {
-      filters.push(`${field} = $${i++}`);
-      values.push(value);
-    }
-  }
-
-  return {
-    where: filters.length ? `AND ${filters.join(" AND ")}` : "",
-    values
-  };
-}
-
-app.get("/api/leads", async (req, res) => {
-  const { where, values } = buildFilterQuery(req.query);
+app.get("/api/leads/:id/history", async (req, res) => {
   const { rows } = await pool.query(
     `
     SELECT *
-    FROM leads
-    WHERE deleted = false
-    ${where}
+    FROM lead_audit_logs
+    WHERE lead_id = $1
     ORDER BY created_at DESC
     `,
-    values
+    [req.params.id]
   );
   res.json(rows);
 });
 
 /* ======================
-   EXPORT LEADS (CSV)
+   UNDO LAST CHANGE
 ====================== */
-app.get("/api/leads/export", async (req, res) => {
+app.post("/api/leads/:id/undo", async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { fields } = req.query;
-    const exportFields = fields ? fields.split(",") : null;
+    await client.query("BEGIN");
 
-    const filterParams = { ...req.query };
-    delete filterParams.fields;
-
-    const { where, values } = buildFilterQuery(filterParams);
-
-    const { rows } = await pool.query(
+    const { rows } = await client.query(
       `
       SELECT *
-      FROM leads
-      WHERE deleted = false
-      ${where}
+      FROM lead_audit_logs
+      WHERE lead_id = $1
       ORDER BY created_at DESC
+      LIMIT 1
       `,
-      values
+      [req.params.id]
     );
 
     if (!rows.length) {
-      return res.status(400).json({ error: "No data to export" });
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Nothing to undo" });
     }
 
-    const parser = new Parser({
-      fields: exportFields || Object.keys(rows[0])
-    });
+    const last = rows[0];
 
-    const csvData = parser.parse(rows);
-
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="leads_export_${Date.now()}.csv"`
+    await client.query(
+      `UPDATE leads SET ${last.field_name} = $1 WHERE id = $2`,
+      [last.old_value, req.params.id]
     );
 
-    res.send(csvData);
+    await client.query(
+      "DELETE FROM lead_audit_logs WHERE id = $1",
+      [last.id]
+    );
+
+    await client.query("COMMIT");
+    res.json({ undone: true });
   } catch (err) {
-    console.error("EXPORT ERROR:", err.message);
+    await client.query("ROLLBACK");
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
 /* ======================
-   REST OF YOUR LOGIC
-   (CREATE / UPDATE / BULK / AI / DASHBOARD)
-   — UNCHANGED —
-====================== */
-
-/* ======================
    START SERVER
 ====================== */
-
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`✅ AltoCRM running on ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`✅ AltoCRM running on ${PORT}`)
+);
