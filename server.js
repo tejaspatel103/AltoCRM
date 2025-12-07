@@ -15,7 +15,9 @@ const pool = new Pool({
 });
 
 /* ------------------ HEALTH CHECK ------------------ */
-app.get('/api/health', (_, res) => res.json({ ok: true }));
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true });
+});
 
 /* ------------------ FIELDS (CRM SCHEMA) ------------------ */
 app.get('/api/fields', async (_req, res) => {
@@ -40,40 +42,32 @@ app.get('/api/fields', async (_req, res) => {
   }
 });
 
-/* ------------------ ✅ FIXED: GET LEADS ------------------ */
+/* ------------------ GET LEADS (EAV FORMAT) ------------------ */
 app.get('/api/leads', async (_req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT
-        l.id AS lead_id,
-        f.key AS field_key,
-        lv.value
-      FROM leads l
-      LEFT JOIN leads_value lv ON lv.lead_id = l.id
-      LEFT JOIN fields f ON f.key = lv.field_key
-      WHERE l.deleted_at IS NULL
-      ORDER BY l.created_at DESC
+    const leads = await pool.query(`
+      SELECT id
+      FROM leads
+      WHERE deleted_at IS NULL
+      ORDER BY created_at DESC
     `);
 
-    const leadsMap = {};
+    const values = await pool.query(`
+      SELECT lead_id, field_key, value
+      FROM leads_value
+    `);
 
-    result.rows.forEach(row => {
-      if (!leadsMap[row.lead_id]) {
-        leadsMap[row.lead_id] = { id: row.lead_id };
-      }
-      if (row.field_key) {
-        leadsMap[row.lead_id][row.field_key] = row.value ?? '';
-      }
+    res.json({
+      leads: leads.rows,
+      values: values.rows
     });
-
-    res.json(Object.values(leadsMap));
   } catch (err) {
     console.error('LEADS ERROR:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ------------------ ✅ FIXED: CREATE LEAD ------------------ */
+/* ------------------ CREATE LEAD (FULLY INITIALIZED) ------------------ */
 app.post('/api/leads', async (_req, res) => {
   const client = await pool.connect();
   try {
@@ -93,10 +87,8 @@ app.post('/api/leads', async (_req, res) => {
     for (const f of fields.rows) {
       await client.query(
         `
-        INSERT INTO leads_value
-          (lead_id, field_key, value, source, locked)
-        VALUES
-          ($1, $2, '', 'manual', false)
+        INSERT INTO leads_value (lead_id, field_key, value, source, locked)
+        VALUES ($1, $2, '', 'manual', false)
         `,
         [leadId, f.key]
       );
@@ -124,6 +116,7 @@ app.post('/api/leads', async (_req, res) => {
 /* ------------------ UPDATE CELL ------------------ */
 app.post('/api/lead-value', async (req, res) => {
   const { lead_id, field_key, value, source = 'manual' } = req.body;
+
   try {
     await pool.query(
       `
@@ -153,9 +146,10 @@ app.post('/api/lead-value', async (req, res) => {
   }
 });
 
-/* ------------------ DELETE LEAD (SOFT) ------------------ */
+/* ------------------ DELETE LEADS (SOFT + LOGGED) ------------------ */
 app.post('/api/leads/delete', async (req, res) => {
   const { ids } = req.body;
+
   try {
     await pool.query(
       `UPDATE leads SET deleted_at = now() WHERE id = ANY($1)`,
@@ -179,12 +173,12 @@ app.post('/api/leads/delete', async (req, res) => {
   }
 });
 
-/* ------------------ SERVE UI ------------------ */
+/* ------------------ SERVE FRONTEND ------------------ */
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-/* ------------------ START ------------------ */
+/* ------------------ START SERVER ------------------ */
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`✅ AltoCRM running on port ${PORT}`);
