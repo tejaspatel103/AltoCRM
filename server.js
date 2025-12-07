@@ -208,14 +208,12 @@ async function processNextJob() {
    JOB HANDLER
 ====================== */
 async function handleJob(job) {
-  const payload = job.payload;
-
   if (job.job_type === "ai_enrich") {
-    await processAIEnrichJob(payload);
+    await processAIEnrichJob(job.payload);
   }
 
   if (job.job_type === "import_row") {
-    await processImportRowJob(payload);
+    await processImportRowJob(job.payload);
   }
 }
 
@@ -230,8 +228,7 @@ async function processAIEnrichJob({ lead_id }) {
 
   if (!rows.length) return;
 
-  const lead = rows[0];
-  const ai = aiSuggestLead(lead);
+  const ai = aiSuggestLead(rows[0]);
 
   for (const field of Object.keys(ai.suggestions)) {
     await upsertFieldLock({
@@ -266,7 +263,7 @@ async function processImportRowJob({ data }) {
 app.get("/", (_, res) => res.send("✅ AltoCRM API running"));
 
 /* ======================
-   UPDATE LEAD (RESPECT AI LOCKS)
+   UPDATE LEAD (LOCK-AWARE)
 ====================== */
 app.patch("/api/leads/:id", async (req, res) => {
   const client = await pool.connect();
@@ -320,7 +317,7 @@ app.patch("/api/leads/:id", async (req, res) => {
 });
 
 /* ======================
-   AI ENQUEUE (BACKGROUND)
+   AI ENQUEUE
 ====================== */
 app.post("/api/leads/:id/ai/enqueue", async (req, res) => {
   await enqueueJob("ai_enrich", { lead_id: req.params.id });
@@ -328,46 +325,8 @@ app.post("/api/leads/:id/ai/enqueue", async (req, res) => {
 });
 
 /* ======================
-   FIELD LOCK ENDPOINTS
+   LOCK ENDPOINTS
 ====================== */
-app.post("/api/leads/:id/ai/lock", async (req, res) => {
-  const leadId = req.params.id;
-
-  const { rows } = await pool.query(
-    `SELECT * FROM leads WHERE id = $1`,
-    [leadId]
-  );
-
-  if (!rows.length) {
-    return res.status(404).json({ error: "Lead not found" });
-  }
-
-  const ai = aiSuggestLead(rows[0]);
-
-  for (const field of Object.keys(ai.suggestions)) {
-    await upsertFieldLock({
-      lead_id: leadId,
-      field_name: field,
-      ai_value: ai.suggestions[field],
-      confidence: ai.confidence[field]
-    });
-  }
-
-  res.json({ locked_fields: ai.suggestions });
-});
-
-app.get("/api/leads/:id/locks", async (req, res) => {
-  const { rows } = await pool.query(
-    `
-    SELECT field_name, locked, locked_by, ai_value, confidence
-    FROM lead_field_locks
-    WHERE lead_id = $1
-    `,
-    [req.params.id]
-  );
-  res.json(rows);
-});
-
 app.post("/api/leads/:id/unlock", async (req, res) => {
   const { field_name } = req.body;
 
@@ -383,8 +342,20 @@ app.post("/api/leads/:id/unlock", async (req, res) => {
   res.json({ unlocked: field_name });
 });
 
+app.get("/api/leads/:id/locks", async (req, res) => {
+  const { rows } = await pool.query(
+    `
+    SELECT field_name, locked, locked_by, ai_value, confidence
+    FROM lead_field_locks
+    WHERE lead_id = $1
+    `,
+    [req.params.id]
+  );
+  res.json(rows);
+});
+
 /* ======================
-   VIEW AUDIT HISTORY
+   AUDIT HISTORY + UNDO
 ====================== */
 app.get("/api/leads/:id/history", async (req, res) => {
   const { rows } = await pool.query(
@@ -399,9 +370,6 @@ app.get("/api/leads/:id/history", async (req, res) => {
   res.json(rows);
 });
 
-/* ======================
-   UNDO LAST CHANGE
-====================== */
 app.post("/api/leads/:id/undo", async (req, res) => {
   const client = await pool.connect();
   try {
@@ -446,88 +414,28 @@ app.post("/api/leads/:id/undo", async (req, res) => {
 });
 
 /* ======================
-   DASHBOARD ENDPOINTS
+   DASHBOARD
 ====================== */
-
-/* Pipeline summary counts for each stage */
 app.get("/api/pipeline/summary", async (_req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT pipeline, COUNT(*) AS count
-      FROM leads
-      WHERE deleted = false
-      GROUP BY pipeline
-      ORDER BY pipeline
-    `);
-    res.json(rows);
-  } catch (err) {
-    console.error("PIPELINE SUMMARY ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+  const { rows } = await pool.query(`
+    SELECT pipeline, COUNT(*)::int AS count
+    FROM leads
+    WHERE deleted = false
+    GROUP BY pipeline
+  `);
+  res.json(rows);
 });
 
-/* Kanban-style pipeline columns */
-app.get("/api/dashboard/pipeline", async (_req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT *
-      FROM leads
-      WHERE deleted = false
-      ORDER BY created_at DESC
-    `);
-
-    const grouped = {};
-    rows.forEach(lead => {
-      const stage = lead.pipeline || "Unassigned";
-      if (!grouped[stage]) grouped[stage] = [];
-      grouped[stage].push(lead);
-    });
-
-    res.json(grouped);
-  } catch (err) {
-    console.error("DASHBOARD PIPELINE ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* Top-level stats cards */
 app.get("/api/dashboard/stats", async (_req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT
-        COUNT(*) FILTER (WHERE deleted = false) AS total_leads,
-        COUNT(*) FILTER (WHERE deleted = false AND created_at::date = CURRENT_DATE) AS new_today,
-        COUNT(*) FILTER (WHERE deleted = false AND (email1 IS NULL OR email1 = '')) AS missing_email,
-        COUNT(*) FILTER (WHERE deleted = false AND (pipeline IS NULL OR pipeline = '')) AS missing_pipeline,
-        COUNT(*) FILTER (WHERE deleted = false AND pipeline = 'Won') AS won,
-        COUNT(*) FILTER (WHERE deleted = false AND pipeline = 'Lost') AS lost
-      FROM leads
-    `);
-
-    res.json(rows[0]);
-  } catch (err) {
-    console.error("DASHBOARD STATS ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* Upcoming next actions list */
-app.get("/api/dashboard/next-actions", async (_req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT *
-      FROM leads
-      WHERE deleted = false
-      AND next_action_date IS NOT NULL
-      ORDER BY next_action_date ASC
-      LIMIT 50
-    `);
-
-    res.json(rows);
-  } catch (err) {
-    console.error("NEXT ACTION ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  }
+  const { rows } = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE deleted = false) AS total_leads,
+      COUNT(*) FILTER (WHERE deleted = false AND created_at::date = CURRENT_DATE) AS new_today,
+      COUNT(*) FILTER (WHERE deleted = false AND pipeline = 'Won') AS won,
+      COUNT(*) FILTER (WHERE deleted = false AND pipeline = 'Lost') AS lost
+    FROM leads
+  `);
+  res.json(rows[0]);
 });
 
 /* ======================
