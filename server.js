@@ -88,9 +88,9 @@ async function upsertFieldMeta({ lead_id, field_name, source, confidence = null,
   await pool.query(
     `
     INSERT INTO lead_field_meta
-    (lead_id, field_key, source, confidence, locked)
+    (lead_id, field_name, source, confidence, locked)
     VALUES ($1,$2,$3,$4,$5)
-    ON CONFLICT (lead_id, field_key)
+    ON CONFLICT (lead_id, field_name)
     DO UPDATE SET source=$3, confidence=$4, locked=$5, updated_at=now()
     `,
     [lead_id, field_name, source, confidence, locked]
@@ -173,9 +173,9 @@ async function processAIEnrichJob({ lead_id }) {
   const ai = aiSuggestLead(lead);
 
   const { rows: defs } = await pool.query(`
-    SELECT field_key FROM crm_fields WHERE enrichable=true AND is_system=false
+    SELECT field_name FROM crm_fields WHERE enrichable=true AND is_system=false
   `);
-  const enrichable = defs.map(d => d.field_key);
+  const enrichable = defs.map(d => d.field_name);
 
   for (const field of Object.keys(ai.suggestions)) {
     if (!enrichable.includes(field)) continue;
@@ -206,7 +206,7 @@ async function processAIEnrichJob({ lead_id }) {
 app.get("/api/fields", async (_, res) => {
   const { rows } = await pool.query(`
     SELECT
-      field_key,
+      field_name,
       label,
       field_type,
       editable,
@@ -223,7 +223,7 @@ app.get("/api/fields", async (_, res) => {
   `);
 
   const fields = rows.map(f => ({
-    id: f.field_key,
+    id: f.field_name,
     label: f.label,
     type: f.field_type,
     group: f.is_core ? "core" : f.is_system ? "system" : "custom",
@@ -251,9 +251,9 @@ app.get("/api/leads", async (req, res) => {
   const offset = (page - 1) * pageSize;
 
   const { rows: fieldDefs } = await pool.query(`
-    SELECT field_key FROM crm_fields WHERE visible IS TRUE
+    SELECT field_name FROM crm_fields WHERE visible IS TRUE
   `);
-  const fieldKeys = fieldDefs.map(f => f.field_key);
+  const fieldKeys = fieldDefs.map(f => f.field_name);
 
   const { rows: leads } = await pool.query(
     `
