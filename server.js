@@ -32,19 +32,32 @@ const upload = multer({ dest: "uploads/" });
    PIPELINE STAGES
 ====================== */
 const PIPELINE_STAGES = [
-  "New","Trying","Contacted","Follow-up","Meeting Booked",
-  "Proposal","Won","Very Important","Lost","Not Interested","Tired of trying"
+  "New",
+  "Trying",
+  "Contacted",
+  "Follow-up",
+  "Meeting Booked",
+  "Proposal",
+  "Won",
+  "Very Important",
+  "Lost",
+  "Not Interested",
+  "Tired of trying"
 ];
 
 /* ======================
    FIELD CATEGORY CONSTANTS
 ====================== */
 const INTEGRATION_FIELDS = [
-  "email1_status","email2_status","email_sequence",
-  "last_email","last_phone_date","call_count"
+  "email1_status",
+  "email2_status",
+  "email_sequence",
+  "last_email",
+  "last_phone_date",
+  "call_count"
 ];
 
-const DERIVED_FIELDS = ["local_time","timezone"];
+const DERIVED_FIELDS = ["local_time", "timezone"];
 
 /* ======================
    AI HELPERS (STUB)
@@ -70,7 +83,13 @@ function aiSuggestLead(lead) {
 /* ======================
    AUDIT HELPER
 ====================== */
-async function auditChange({ lead_id, field_name, old_value, new_value, actor_type }) {
+async function auditChange({
+  lead_id,
+  field_name,
+  old_value,
+  new_value,
+  actor_type
+}) {
   await pool.query(
     `
     INSERT INTO lead_audit_logs
@@ -84,7 +103,16 @@ async function auditChange({ lead_id, field_name, old_value, new_value, actor_ty
 /* ======================
    FIELD META HELPERS
 ====================== */
-async function upsertFieldMeta({ lead_id, field_name, source, locked = false }) {
+/**
+ * Aligns with your actual table:
+ * lead_field_meta(lead_id, field_name, source, locked, last_updated_at, last_updated_by, created_at)
+ */
+async function upsertFieldMeta({
+  lead_id,
+  field_name,
+  source,
+  locked = false
+}) {
   await pool.query(
     `
     INSERT INTO lead_field_meta
@@ -101,7 +129,6 @@ async function upsertFieldMeta({ lead_id, field_name, source, locked = false }) 
   );
 }
 
-
 async function isFieldLocked(lead_id, field_name) {
   const { rows } = await pool.query(
     `SELECT locked FROM lead_field_locks WHERE lead_id=$1 AND field_name=$2`,
@@ -115,7 +142,7 @@ async function isFieldLocked(lead_id, field_name) {
 ====================== */
 async function enqueueJob(job_type, payload) {
   await pool.query(
-    `INSERT INTO background_jobs (job_type,payload,status) VALUES ($1,$2,'pending')`,
+    `INSERT INTO background_jobs (job_type, payload, status) VALUES ($1, $2, 'pending')`,
     [job_type, payload]
   );
 }
@@ -129,7 +156,7 @@ async function processNextJob() {
 
     const { rows } = await client.query(`
       SELECT * FROM background_jobs
-      WHERE status='pending'
+      WHERE status = 'pending'
       ORDER BY created_at
       LIMIT 1
       FOR UPDATE SKIP LOCKED
@@ -141,8 +168,9 @@ async function processNextJob() {
     }
 
     job = rows[0];
+
     await client.query(
-      `UPDATE background_jobs SET status='processing' WHERE id=$1`,
+      `UPDATE background_jobs SET status='processing', updated_at = now() WHERE id=$1`,
       [job.id]
     );
     await client.query("COMMIT");
@@ -152,13 +180,13 @@ async function processNextJob() {
     }
 
     await pool.query(
-      `UPDATE background_jobs SET status='done' WHERE id=$1`,
+      `UPDATE background_jobs SET status='done', updated_at = now() WHERE id=$1`,
       [job.id]
     );
   } catch (err) {
     if (job) {
       await pool.query(
-        `UPDATE background_jobs SET status='failed', last_error=$1 WHERE id=$2`,
+        `UPDATE background_jobs SET status='failed', last_error=$1, updated_at = now() WHERE id=$2`,
         [err.message, job.id]
       );
     }
@@ -171,26 +199,37 @@ async function processNextJob() {
    AI ENRICH JOB
 ====================== */
 async function processAIEnrichJob({ lead_id }) {
-  const { rows } = await pool.query(`SELECT * FROM leads WHERE id=$1`, [lead_id]);
+  const { rows } = await pool.query(`SELECT * FROM leads WHERE id=$1`, [
+    lead_id
+  ]);
   if (!rows.length) return;
 
   const lead = rows[0];
   const ai = aiSuggestLead(lead);
 
   const { rows: defs } = await pool.query(`
-    SELECT field_name FROM crm_fields WHERE enrichable=true AND is_system=false
+    SELECT field_key
+    FROM crm_fields
+    WHERE enrichable = true AND is_system = false
   `);
-  const enrichable = defs.map(d => d.field_name);
+  const enrichable = defs.map((d) => d.field_key);
 
   for (const field of Object.keys(ai.suggestions)) {
     if (!enrichable.includes(field)) continue;
 
     await pool.query(
       `
-      INSERT INTO lead_field_locks (lead_id,field_name,ai_value,confidence,locked,locked_by)
-      VALUES ($1,$2,$3,$4,true,'ai')
-      ON CONFLICT (lead_id,field_name)
-      DO UPDATE SET ai_value=$3, confidence=$4, locked=true, updated_at=now()
+      INSERT INTO lead_field_locks
+        (lead_id, field_name, ai_value, confidence, locked, locked_by, updated_at)
+      VALUES
+        ($1,$2,$3,$4,true,'ai', now())
+      ON CONFLICT (lead_id, field_name)
+      DO UPDATE SET
+        ai_value   = EXCLUDED.ai_value,
+        confidence = EXCLUDED.confidence,
+        locked     = true,
+        locked_by  = 'ai',
+        updated_at = now()
       `,
       [lead_id, field, ai.suggestions[field], ai.confidence[field]]
     );
@@ -199,7 +238,6 @@ async function processAIEnrichJob({ lead_id }) {
       lead_id,
       field_name: field,
       source: "ai",
-      confidence: ai.confidence[field],
       locked: true
     });
   }
@@ -208,10 +246,10 @@ async function processAIEnrichJob({ lead_id }) {
 /* ======================
    FIELD REGISTRY API (STEP 5)
 ====================== */
-app.get("/api/fields", async (_, res) => {
+app.get("/api/fields", async (_req, res) => {
   const { rows } = await pool.query(`
     SELECT
-      field_name,
+      field_key,
       label,
       field_type,
       editable,
@@ -227,8 +265,8 @@ app.get("/api/fields", async (_, res) => {
     ORDER BY order_index ASC
   `);
 
-  const fields = rows.map(f => ({
-    id: f.field_name,
+  const fields = rows.map((f) => ({
+    id: f.field_key,
     label: f.label,
     type: f.field_type,
     group: f.is_core ? "core" : f.is_system ? "system" : "custom",
@@ -248,21 +286,26 @@ app.get("/api/fields", async (_, res) => {
 });
 
 /* ======================
-   LEADS FETCH (STEP 5)
+   LEADS FETCH (STEP 5 – NORMALIZED)
 ====================== */
 app.get("/api/leads", async (req, res) => {
   const page = Number(req.query.page || 1);
   const pageSize = Number(req.query.page_size || 50);
   const offset = (page - 1) * pageSize;
 
+  // 1️⃣ Load field keys from crm_fields
   const { rows: fieldDefs } = await pool.query(`
-    SELECT field_name FROM crm_fields WHERE visible IS TRUE
+    SELECT field_key
+    FROM crm_fields
+    WHERE visible IS TRUE
   `);
-  const fieldKeys = fieldDefs.map(f => f.field_name);
+  const fieldKeys = fieldDefs.map((f) => f.field_key);
 
+  // 2️⃣ Fetch base leads
   const { rows: leads } = await pool.query(
     `
-    SELECT * FROM leads
+    SELECT *
+    FROM leads
     WHERE deleted IS NOT TRUE
     ORDER BY created_at DESC
     LIMIT $1 OFFSET $2
@@ -271,37 +314,40 @@ app.get("/api/leads", async (req, res) => {
   );
 
   if (!leads.length) {
-    return res.json({ data: [], page, page_size: pageSize, total: 0 });
+    const empty = { data: [], page, page_size: pageSize, total: 0 };
+    return res.json(empty);
   }
 
-  const leadIds = leads.map(l => l.id);
+  const leadIds = leads.map((l) => l.id);
 
+  // 3️⃣ Fetch field metadata
   const { rows: meta } = await pool.query(
     `
-    SELECT lead_id, field_name, source, confidence, locked
-FROM lead_field_meta
-WHERE lead_id = ANY($1)
-
+    SELECT lead_id, field_name, source, locked
+    FROM lead_field_meta
+    WHERE lead_id = ANY($1)
     `,
     [leadIds]
   );
 
   const metaMap = {};
-  meta.forEach(m => {
+  meta.forEach((m) => {
     metaMap[`${m.lead_id}:${m.field_name}`] = m;
-
   });
 
-  const data = leads.map(lead => {
+  // 4️⃣ Build normalized response
+  const data = leads.map((lead) => {
     const fields = {};
-    fieldKeys.forEach(key => {
+
+    fieldKeys.forEach((key) => {
       if (!(key in lead)) return;
+
       const m = metaMap[`${lead.id}:${key}`];
 
       fields[key] = {
         value: lead[key],
         source: m?.source || "manual",
-        confidence: m?.confidence ?? 1,
+        confidence: 1, // no confidence column in lead_field_meta
         locked: m?.locked === true
       };
     });
@@ -314,7 +360,7 @@ WHERE lead_id = ANY($1)
     };
   });
 
-  const { rows } = await pool.query(
+  const { rows: countRows } = await pool.query(
     `SELECT COUNT(*) FROM leads WHERE deleted IS NOT TRUE`
   );
 
@@ -322,12 +368,12 @@ WHERE lead_id = ANY($1)
     data,
     page,
     page_size: pageSize,
-    total: Number(rows[0].count)
+    total: Number(countRows[0].count)
   });
 });
 
 /* ======================
-   UPDATE LEAD
+   UPDATE LEAD (LOCK & SOURCE AWARE)
 ====================== */
 app.patch("/api/leads/:id", async (req, res) => {
   const client = await pool.connect();
@@ -335,6 +381,7 @@ app.patch("/api/leads/:id", async (req, res) => {
 
   try {
     await client.query("BEGIN");
+
     const { rows } = await client.query(
       `SELECT * FROM leads WHERE id=$1 FOR UPDATE`,
       [leadId]
@@ -347,17 +394,20 @@ app.patch("/api/leads/:id", async (req, res) => {
       if (DERIVED_FIELDS.includes(field)) continue;
       if (INTEGRATION_FIELDS.includes(field)) continue;
       if (await isFieldLocked(leadId, field)) continue;
-      if (String(old[field]) === String(value)) continue;
 
+      const oldValue = old[field];
+      if (String(oldValue) === String(value)) continue;
+
+      // NOTE: this interpolates column name; assume trusted field keys only.
       await client.query(
-        `UPDATE leads SET ${field}=$1 WHERE id=$2`,
+        `UPDATE leads SET ${field} = $1 WHERE id = $2`,
         [value, leadId]
       );
 
       await auditChange({
         lead_id: leadId,
         field_name: field,
-        old_value: old[field],
+        old_value: oldValue,
         new_value: value,
         actor_type: "human"
       });
@@ -391,20 +441,22 @@ app.post("/api/leads/:id/ai/enqueue", async (req, res) => {
 /* ======================
    DASHBOARD
 ====================== */
-app.get("/api/pipeline/summary", async (_, res) => {
+app.get("/api/pipeline/summary", async (_req, res) => {
   const { rows } = await pool.query(`
     SELECT pipeline, COUNT(*)::int AS count
-    FROM leads WHERE deleted=false GROUP BY pipeline
+    FROM leads
+    WHERE deleted = false
+    GROUP BY pipeline
   `);
   res.json(rows);
 });
 
-app.get("/api/dashboard/stats", async (_, res) => {
+app.get("/api/dashboard/stats", async (_req, res) => {
   const { rows } = await pool.query(`
     SELECT
-      COUNT(*) FILTER (WHERE deleted=false) AS total,
-      COUNT(*) FILTER (WHERE pipeline='Won') AS won,
-      COUNT(*) FILTER (WHERE pipeline='Lost') AS lost
+      COUNT(*) FILTER (WHERE deleted = false) AS total,
+      COUNT(*) FILTER (WHERE pipeline = 'Won') AS won,
+      COUNT(*) FILTER (WHERE pipeline = 'Lost') AS lost
     FROM leads
   `);
   res.json(rows[0]);
@@ -413,7 +465,11 @@ app.get("/api/dashboard/stats", async (_, res) => {
 /* ======================
    QUEUE LOOP
 ====================== */
-setInterval(() => processNextJob(), 2000);
+setInterval(() => {
+  processNextJob().catch(() => {
+    // swallow queue errors to avoid crashing the app
+  });
+}, 2000);
 
 /* ======================
    START SERVER
