@@ -84,18 +84,23 @@ async function auditChange({ lead_id, field_name, old_value, new_value, actor_ty
 /* ======================
    FIELD META HELPERS
 ====================== */
-async function upsertFieldMeta({ lead_id, field_name, source, confidence = null, locked = false }) {
+async function upsertFieldMeta({ lead_id, field_name, source, locked = false }) {
   await pool.query(
     `
     INSERT INTO lead_field_meta
-    (lead_id, field_name, source, confidence, locked)
-    VALUES ($1,$2,$3,$4,$5)
+      (lead_id, field_name, source, locked, last_updated_at)
+    VALUES
+      ($1, $2, $3, $4, now())
     ON CONFLICT (lead_id, field_name)
-    DO UPDATE SET source=$3, confidence=$4, locked=$5, updated_at=now()
+    DO UPDATE SET
+      source = EXCLUDED.source,
+      locked = EXCLUDED.locked,
+      last_updated_at = now()
     `,
-    [lead_id, field_name, source, confidence, locked]
+    [lead_id, field_name, source, locked]
   );
 }
+
 
 async function isFieldLocked(lead_id, field_name) {
   const { rows } = await pool.query(
