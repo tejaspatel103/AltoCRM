@@ -147,7 +147,7 @@ async function processNextJob() {
     }
 
     await pool.query(
-      `UPDATE background_jobs SET status='done', completed_at=now() WHERE id=$1`,
+      `UPDATE background_jobs SET status='done' WHERE id=$1`,
       [job.id]
     );
   } catch (err) {
@@ -163,7 +163,7 @@ async function processNextJob() {
 }
 
 /* ======================
-   AI ENRICH JOB (REGISTRY-DRIVEN)
+   AI ENRICH JOB
 ====================== */
 async function processAIEnrichJob({ lead_id }) {
   const { rows } = await pool.query(`SELECT * FROM leads WHERE id=$1`, [lead_id]);
@@ -201,44 +201,126 @@ async function processAIEnrichJob({ lead_id }) {
 }
 
 /* ======================
-   FIELD REGISTRY API
+   FIELD REGISTRY API (STEP 5)
 ====================== */
 app.get("/api/fields", async (_, res) => {
-  const { rows } = await pool.query(`SELECT * FROM crm_fields ORDER BY id`);
-  res.json(rows);
+  const { rows } = await pool.query(`
+    SELECT
+      field_key,
+      label,
+      field_type,
+      editable,
+      enrichable,
+      source,
+      options,
+      visible,
+      order_index,
+      is_system,
+      is_core
+    FROM crm_fields
+    WHERE visible IS TRUE
+    ORDER BY order_index ASC
+  `);
+
+  const fields = rows.map(f => ({
+    id: f.field_key,
+    label: f.label,
+    type: f.field_type,
+    group: f.is_core ? "core" : f.is_system ? "system" : "custom",
+    order: f.order_index ?? 0,
+    is_required: false,
+    is_editable: f.editable === true,
+    is_filterable: true,
+    is_sortable: true,
+    source: f.source || "system",
+    meta: {
+      options: f.options || [],
+      enrichable: f.enrichable === true
+    }
+  }));
+
+  res.json(fields);
 });
 
 /* ======================
-   SCHEMA-AWARE LEADS FETCH
+   LEADS FETCH (STEP 5)
 ====================== */
-app.get("/api/leads", async (_, res) => {
+app.get("/api/leads", async (req, res) => {
+  const page = Number(req.query.page || 1);
+  const pageSize = Number(req.query.page_size || 50);
+  const offset = (page - 1) * pageSize;
+
+  const { rows: fieldDefs } = await pool.query(`
+    SELECT field_key FROM crm_fields WHERE visible IS TRUE
+  `);
+  const fieldKeys = fieldDefs.map(f => f.field_key);
+
   const { rows: leads } = await pool.query(
-    `SELECT * FROM leads WHERE deleted=false ORDER BY created_at DESC`
+    `
+    SELECT * FROM leads
+    WHERE deleted IS NOT TRUE
+    ORDER BY created_at DESC
+    LIMIT $1 OFFSET $2
+    `,
+    [pageSize, offset]
   );
 
-  const { rows: meta } = await pool.query(`SELECT * FROM lead_field_meta`);
-  const metaMap = {};
-  meta.forEach(m => (metaMap[`${m.lead_id}:${m.field_key}`] = m));
+  if (!leads.length) {
+    return res.json({ data: [], page, page_size: pageSize, total: 0 });
+  }
 
-  const result = leads.map(l => {
-    const fields = {};
-    Object.keys(l).forEach(k => {
-      const m = metaMap[`${l.id}:${k}`];
-      fields[k] = {
-        value: l[k],
-        source: m?.source || "manual",
-        confidence: m?.confidence || null,
-        locked: m?.locked || false
-      };
-    });
-    return { id: l.id, fields };
+  const leadIds = leads.map(l => l.id);
+
+  const { rows: meta } = await pool.query(
+    `
+    SELECT lead_id, field_key, source, confidence, locked
+    FROM lead_field_meta
+    WHERE lead_id = ANY($1)
+    `,
+    [leadIds]
+  );
+
+  const metaMap = {};
+  meta.forEach(m => {
+    metaMap[`${m.lead_id}:${m.field_key}`] = m;
   });
 
-  res.json(result);
+  const data = leads.map(lead => {
+    const fields = {};
+    fieldKeys.forEach(key => {
+      if (!(key in lead)) return;
+      const m = metaMap[`${lead.id}:${key}`];
+
+      fields[key] = {
+        value: lead[key],
+        source: m?.source || "manual",
+        confidence: m?.confidence ?? 1,
+        locked: m?.locked === true
+      };
+    });
+
+    return {
+      id: lead.id,
+      created_at: lead.created_at,
+      updated_at: lead.updated_at,
+      fields
+    };
+  });
+
+  const { rows } = await pool.query(
+    `SELECT COUNT(*) FROM leads WHERE deleted IS NOT TRUE`
+  );
+
+  res.json({
+    data,
+    page,
+    page_size: pageSize,
+    total: Number(rows[0].count)
+  });
 });
 
 /* ======================
-   UPDATE LEAD (LOCK & SOURCE AWARE)
+   UPDATE LEAD
 ====================== */
 app.patch("/api/leads/:id", async (req, res) => {
   const client = await pool.connect();
