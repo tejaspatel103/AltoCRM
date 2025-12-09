@@ -273,16 +273,18 @@ app.get("/api/leads", async (req, res) => {
 
   const { rows: meta } = await pool.query(
     `
-    SELECT lead_id, field_key, source, confidence, locked
-    FROM lead_field_meta
-    WHERE lead_id = ANY($1)
+    SELECT lead_id, field_name, source, confidence, locked
+FROM lead_field_meta
+WHERE lead_id = ANY($1)
+
     `,
     [leadIds]
   );
 
   const metaMap = {};
   meta.forEach(m => {
-    metaMap[`${m.lead_id}:${m.field_key}`] = m;
+    metaMap[`${m.lead_id}:${m.field_name}`] = m;
+
   });
 
   const data = leads.map(lead => {
